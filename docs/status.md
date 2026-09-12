@@ -564,8 +564,10 @@ removed to preserve the curated test count.
   CarPlayStartSession and forwards touch to the active `AirPlaySession`.
 - `CarPlayHostActivity` is the full-screen launcher host: a `SurfaceView` plus `AndroidMediaSink`
   and `CarPlayMediaEngine`, SurfaceView touch mapping through `CarPlayTouchMapper`, and VPN consent
-  through `CarPlayVpnService.prepare`. It shows a deployment-configuration status until real
-  VID/PIDs are supplied.
+  through `CarPlayVpnService.prepare`. The bundled runtime config names the CH341
+  `VID_1A86&PID_5512&REV_0304` bridge, declares a matching `usb-device` filter, requests USB
+  permission, and claims the CH341 interface for exclusive use. A timestamped log panel in the
+  bottom-left shows each stage; the iPhone USB identity remains deployer-supplied.
 - `AirPlayPersistence` stores the accessory Ed25519 identity and paired-controller long-term keys
   in SharedPreferences, and `PairingStore` reports saves back to that store.
 - The Lockdown USB PairRecord (host/root/device PEM material, HostID, SystemBUID, and WiFi MAC) is
@@ -595,3 +597,8 @@ $env:OS = "Windows_NT"
 (PID 8842, displayed +376 ms) with no `FATAL EXCEPTION` or `AndroidRuntime` entries in logcat. This
 verifies only the host Activity/SurfaceView lifecycle on an emulator, not any USB, VPN, NCM,
 CarPlay, or MFi hardware behavior.
+
+2026-09-12 CH341 UI smoke: a `uiautomator` dump of the running host shows the bottom-left timestamped
+log panel at bounds `[30,840][2277,1050]` containing the bundled `CH341 1A86:5512` startup line and
+the expected emulator result `Failed: No configured CH341 USB device found`. This confirms the
+config, USB-filter manifest merge, and live log rendering, not physical CH341 ownership.

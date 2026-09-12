@@ -10,7 +10,7 @@ import java.net.InetAddress
  * CH341 product IDs: the physical devices attached to the target must be identified first.
  */
 class CarPlayRuntimeConfig(
-    val iphoneDevices: List<UsbDeviceId>,
+    val iphoneDevices: List<UsbDeviceId> = emptyList(),
     val ch341Devices: List<UsbDeviceId> = emptyList(),
     val linuxI2cPath: String? = null,
     val hostMac: ByteArray = DEFAULT_HOST_MAC,
@@ -21,7 +21,6 @@ class CarPlayRuntimeConfig(
     val hostName: String = "xcertplay",
 ) {
     init {
-        require(iphoneDevices.isNotEmpty()) { "At least one iPhone USB identity is required" }
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {
             "iPhone USB identities must use Apple vendor ID 0x${APPLE_VENDOR_ID.toString(16)}"
         }

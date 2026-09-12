@@ -207,9 +207,9 @@ board I2C), iPhone USB permission and re-enumeration, configuration 6, USBMUX/Lo
 carkit TLS, iAP2 CSM control, NCM data-path open, VPN attach, and the AirPlay `7000` listener. It
 advertises the VPN link-local IPv6 endpoint in CarPlayStartSession and forwards SurfaceView touch
 to the active `AirPlaySession`. `CarPlayHostActivity` is the full-screen launcher host with a
-`SurfaceView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. Deployment Apple/CH341 VID/PIDs and
-MFi transport identity are supplied through `CarPlayRuntimeConfig`; until those are configured the
-host reports a configuration status. The accessory Ed25519 identity and controller pairings are
-persisted through `AirPlayPersistence`, and the Lockdown USB PairRecord is reused across reconnects,
-so a trusted phone survives app restarts without a new trust dialog. This integration has not been
-hardware-verified.
+`SurfaceView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. The bundled host configures the CH341
+`VID_1A86&PID_5512` bridge, requests USB permission and claims its interface, and shows a live
+bottom-left log of every bring-up stage; the iPhone USB identity remains deployer-supplied. The
+accessory Ed25519 identity and controller pairings are persisted through `AirPlayPersistence`, and
+the Lockdown USB PairRecord is reused across reconnects, so a trusted phone survives app restarts
+without a new trust dialog. This integration has not been hardware-verified.

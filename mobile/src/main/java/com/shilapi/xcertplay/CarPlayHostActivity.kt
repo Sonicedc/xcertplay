@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -27,6 +28,11 @@ import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.orchestration.CarPlayStatus
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
+import com.shilapi.xcertplay.transport.UsbDeviceId
+import java.text.SimpleDateFormat
+import java.util.ArrayDeque
+import java.util.Date
+import java.util.Locale
 
 /**
  * Full-screen CarPlay host. It renders decoded video through a [SurfaceView], forwards touch to
@@ -36,14 +42,6 @@ import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
  * on the target unit. Until then the activity shows a status overlay and the stack stays inert.
  */
 class CarPlayHostActivity : ComponentActivity() {
-    // Deployer: populate with the target's real VID/PID pairs, for example:
-    // CarPlayRuntimeConfig(
-    //     iphoneDevices = listOf(UsbDeviceId(0x05ac, 0x12a8)),
-    //     ch341Devices = listOf(UsbDeviceId(0x1a86, 0x5512)),
-    //     identification = identification,
-    // )
-    private val runtimeConfig: CarPlayRuntimeConfig? = null
-
     private val airPlayConfig = AirPlayConfig(
         deviceName = "xcertplay",
         deviceId = "xcertplay-device",
@@ -61,6 +59,11 @@ class CarPlayHostActivity : ComponentActivity() {
         hardwareVersion = "1.0",
         carPlayUsbInterfaceNumber = 1,
     )
+    // CH341 USB\VID_1A86&PID_5512&REV_0304 is the deployment-supplied bridge identity.
+    private val runtimeConfig: CarPlayRuntimeConfig = CarPlayRuntimeConfig(
+        ch341Devices = listOf(UsbDeviceId(0x1a86, 0x5512)),
+        identification = identification,
+    )
 
     private val vpnConsent =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -72,10 +75,12 @@ class CarPlayHostActivity : ComponentActivity() {
     private var sink: AndroidMediaSink? = null
     private var controller: CarPlayController? = null
     private var currentSurface: Surface? = null
+    private val logLines = ArrayDeque<String>()
 
     private val surfaceCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
             currentSurface = holder.surface
+            appendLog("Surface created")
             attachSurface(holder.surface)
         }
 
@@ -83,6 +88,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
         override fun surfaceDestroyed(holder: SurfaceHolder) {
             if (currentSurface === holder.surface) currentSurface = null
+            appendLog("Surface destroyed")
         }
     }
 
@@ -92,12 +98,9 @@ class CarPlayHostActivity : ComponentActivity() {
         setContentView(buildContentView())
         hideSystemBars()
 
-        if (runtimeConfig == null) {
-            setStatus("Deployment configuration required")
-        } else {
-            val consent = CarPlayVpnService.prepare(this)
-            if (consent == null) startCarPlay() else vpnConsent.launch(consent)
-        }
+        appendLog("Host started; CH341 1A86:5512 configured")
+        val consent = CarPlayVpnService.prepare(this)
+        if (consent == null) startCarPlay() else vpnConsent.launch(consent)
     }
 
     override fun onResume() {
@@ -123,27 +126,30 @@ class CarPlayHostActivity : ComponentActivity() {
             holder.addCallback(surfaceCallback)
             setOnTouchListener { view, event -> onTouch(view, event) }
         }
-        val status = TextView(this).apply {
+        val log = TextView(this).apply {
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.argb(150, 0, 0, 0))
             setPadding(dp(12), dp(8), dp(12), dp(8))
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
             text = ""
         }
         val statusParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM or Gravity.START,
         )
         statusParams.setMargins(dp(12), 0, dp(12), dp(12))
         root.addView(surface)
-        root.addView(status, statusParams)
+        root.addView(log, statusParams)
         surfaceView = surface
-        statusView = status
+        statusView = log
         return root
     }
 
     private fun startCarPlay() {
-        val config = runtimeConfig ?: return
+        val config = runtimeConfig
+        appendLog("Starting CarPlay controller")
         val renderer = AndroidMediaSink(null)
         sink = renderer
         currentSurface?.let(::attachSurface)
@@ -179,7 +185,14 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun setStatus(message: String) {
-        statusView?.text = message
+        appendLog(message)
+    }
+
+    private fun appendLog(message: String) {
+        val line = "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())}  $message"
+        logLines.addLast(line)
+        while (logLines.size > MAX_LOG_LINES) logLines.removeFirst()
+        statusView?.text = logLines.joinToString("\n")
     }
 
     private fun hideSystemBars() {
@@ -211,5 +224,6 @@ class CarPlayHostActivity : ComponentActivity() {
     private companion object {
         const val SCREEN_TYPE_MAIN = 110
         const val SCREEN_TYPE_ALT = 111
+        const val MAX_LOG_LINES = 120
     }
 }
