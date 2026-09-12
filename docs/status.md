@@ -493,14 +493,15 @@ test passed and was removed to preserve the curated test count.
   VideoFrame with the DataStream output key and per-frame nonce, and extracts avcC/hvcC codec
   config from VideoConfig. `CarPlayMediaEngine` binds the screen/audio/data ports and owns their
   lifetime.
+- `AudioStream` binds the RTP data and RTCP control UDP ports and decrypts LIVI's RTP layout:
+  12-byte header, ciphertext, 16-byte tag, and 8-byte little-endian nonce, with the header's last
+  eight bytes as AAD. `AudioStreamCodec` maps the negotiated audioFormat bits to AAC-LC, Opus, or
+  LPCM.
 - `IapTunnel` receives the iAP2-over-CarPlay DataStream (type 130): NetSocketChaCha20Poly1305
   stream framing followed by APTransportPackage records, emitting `comm` iAP2 bodies.
-- `AirPlaySession` opens the optional `keepAlivePort` when the phone requests low-power keep-alive.
-
-The LIVI audio receiver is a native component absent from this reference checkout, so the audio
-wire format is deliberately not inferred or invented here: audio SETUP and `POST /feedback`
-anchors remain unhandled until a grounded implementation exists. `NtpClock` supplies an
-unsigned-NTP64 clock for that future feedback path.
+- `AirPlaySession` answers `POST /feedback` from the active audio streams using the synced NTP64
+  clock and each stream's first-sample anchor, and opens the optional `keepAlivePort` when the
+  phone requests low-power keep-alive.
 
 Decoded media is delivered to the `MediaSink` callback interface. Android MediaCodec/AudioTrack
 rendering, the SurfaceView touch path, and USB bring-up orchestration remain outside this stage and

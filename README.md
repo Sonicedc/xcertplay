@@ -179,10 +179,10 @@ This has not been verified against an iPhone or vehicle head unit.
 
 `CarPlayMediaEngine` is the concrete `AirPlayMediaHandler`: it binds the screen, audio, and
 iAP2 DataStream ports and decrypts their payloads. `ScreenStream` frames the 128-byte
-AirPlayScreenHeader and extracts avcC/hvcC config, and `IapTunnel` reassembles the
-iAP2-over-CarPlay stream. `NtpClock` performs the CarPlay timing exchange, and `AirPlaySession`
-opens the optional keep-alive port. Decoded media is delivered to the `MediaSink` interface;
-audio transport is intentionally unhandled until a grounded reference implementation exists,
-and Android MediaCodec/AudioTrack rendering plus SurfaceView touch input remain integration seams.
+AirPlayScreenHeader and extracts avcC/hvcC config, `AudioStream` decrypts the LIVI RTP datagram
+layout, and `IapTunnel` reassembles the iAP2-over-CarPlay stream. `NtpClock` performs the CarPlay
+timing exchange, and `AirPlaySession` uses it for `/feedback` media-clock anchors plus the optional
+keep-alive port. Decoded media is delivered to the `MediaSink` interface; Android
+MediaCodec/AudioTrack rendering and SurfaceView touch input remain integration seams.
 
 This has not been verified against an iPhone or vehicle head unit.
