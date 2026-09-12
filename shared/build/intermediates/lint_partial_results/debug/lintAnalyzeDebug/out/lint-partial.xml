@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<incidents format="6" by="lint 9.3.0" type="partial_results">
+    <map id="UnsafeImplicitIntentLaunch">
+    </map>
+    <map id="UnsafeIntentLaunch">
+            <map id="unprotected">
+                <entry
+                    name="android.content.BroadcastReceiver"
+                    boolean="true"/>
+                <entry
+                    name="com.shilapi.xcertplay.shared.MyCarAppService"
+                    boolean="true"/>
+            </map>
+    </map>
+    <map id="UnusedResources">
+        <location id="R.xml.automotive_app_desc"
+            file="${:shared*debug*MAIN*sourceProvider*0*resDir*0}/xml/automotive_app_desc.xml"
+            line="2"
+            column="1"
+            startOffset="39"
+            endLine="4"
+            endColumn="17"
+            endOffset="100"/>
+        <entry
+            name="model"
+            string="xml[automotive_app_desc(D)];;;;"/>
+    </map>
+
+</incidents>

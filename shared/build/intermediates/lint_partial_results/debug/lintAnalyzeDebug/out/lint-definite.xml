@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<incidents format="6" by="lint 9.3.0" type="incidents">
+
+    <incident
+        id="ExportedService"
+        severity="warning"
+        message="Exported service does not require permission">
+        <fix-alternatives>
+            <fix-attribute
+                description="Set permission"
+                namespace="http://schemas.android.com/apk/res/android"
+                attribute="permission"
+                value="TODO"
+                point="4"
+                mark="0"/>
+            <fix-attribute
+                description="Set exported=&quot;false&quot;"
+                namespace="http://schemas.android.com/apk/res/android"
+                attribute="exported"
+                value="false"/>
+        </fix-alternatives>
+        <location
+            file="${:shared*debug*MAIN*sourceProvider*0*manifest*0}"
+            line="13"
+            column="10"
+            startOffset="353"
+            endLine="13"
+            endColumn="17"
+            endOffset="360"/>
+    </incident>
+
+</incidents>

@@ -1,0 +1,17 @@
+[
+{
+  "message": "Start JSON generation. Platform version: 29 min SDK version: x86_64",
+  "file": "C:\\Users\\shila\\Desktop\\carplay-apk-on-ch341\\shared\\src\\main\\jni\\Android.mk",
+  "tag": "debug|x86_64"
+},
+{
+  "message": "JSON \u0027C:\\Users\\shila\\Desktop\\carplay-apk-on-ch341\\shared\\build\\.cxx\\Debug\\1ei4496z\\x86_64\\android_gradle_build.json\u0027 was up-to-date",
+  "file": "C:\\Users\\shila\\Desktop\\carplay-apk-on-ch341\\shared\\src\\main\\jni\\Android.mk",
+  "tag": "debug|x86_64"
+},
+{
+  "message": "JSON generation completed without problems",
+  "file": "C:\\Users\\shila\\Desktop\\carplay-apk-on-ch341\\shared\\src\\main\\jni\\Android.mk",
+  "tag": "debug|x86_64"
+}
+]

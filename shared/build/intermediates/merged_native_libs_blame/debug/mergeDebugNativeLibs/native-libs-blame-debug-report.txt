@@ -1,0 +1,3 @@
+lib/armeabi-v7a\libxcertplay_i2c.so->Project
+lib/arm64-v8a\libxcertplay_i2c.so->Project
+lib/x86_64\libxcertplay_i2c.so->Project

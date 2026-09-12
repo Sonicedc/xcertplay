@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.shilapi.xcertplay.mfi.MfiSelfCheckTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-09-12T02:40:25.279Z" hostname="LAPI-PC-002" time="0.01">
+  <properties/>
+  <testcase name="fallsBackToSecondCandidateThenReportsRawProtocolMajor" classname="com.shilapi.xcertplay.mfi.MfiSelfCheckTest" time="0.01"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

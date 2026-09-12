@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<incidents format="6" by="lint 9.3.0" type="conditional_incidents">
+
+    <incident
+        id="UnspecifiedRegisterReceiverFlag"
+        severity="error"
+        message="`receiver` is missing `RECEIVER_EXPORTED` or `RECEIVER_NOT_EXPORTED` flag for unprotected broadcasts registered for an IntentFilter that cannot be inspected by lint">
+        <fix-alternatives>
+            <fix-replace
+                description="Add RECEIVER_NOT_EXPORTED (preferred)"
+                replacement="androidx.core.content.ContextCompat.registerReceiver(appContext, receiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)"
+                shortenNames="true"
+                reformat="value"
+                priority="0">
+                <range
+                    file="${:shared*debug*MAIN*sourceProvider*0*javaDir*0}/com/shilapi/xcertplay/transport/IphoneUsbHost.kt"
+                    startOffset="14393"
+                    endOffset="14438"/>
+            </fix-replace>
+            <fix-replace
+                description="Add RECEIVER_EXPORTED"
+                replacement="androidx.core.content.ContextCompat.registerReceiver(appContext, receiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED)"
+                shortenNames="true"
+                reformat="value"
+                priority="0">
+                <range
+                    file="${:shared*debug*MAIN*sourceProvider*0*javaDir*0}/com/shilapi/xcertplay/transport/IphoneUsbHost.kt"
+                    startOffset="14393"
+                    endOffset="14438"/>
+            </fix-replace>
+        </fix-alternatives>
+        <location
+            file="${:shared*debug*MAIN*sourceProvider*0*javaDir*0}/com/shilapi/xcertplay/transport/IphoneUsbHost.kt"
+            line="330"
+            column="13"
+            startOffset="14393"
+            endLine="330"
+            endColumn="58"
+            endOffset="14438"/>
+        <map>
+            <entry
+                name="hasUnprotected"
+                boolean="false"/>
+        </map>
+    </incident>
+
+</incidents>
