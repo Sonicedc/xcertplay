@@ -9,6 +9,7 @@ import android.hardware.usb.UsbManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayContact
 import com.shilapi.xcertplay.airplay.AirPlayDeviceInfo
@@ -30,6 +31,7 @@ import com.shilapi.xcertplay.transport.Iap2UsbSession
 import com.shilapi.xcertplay.transport.Iap2WiredCarPlayEndpoint
 import com.shilapi.xcertplay.transport.Iap2WiredControlClient
 import com.shilapi.xcertplay.transport.Iap2WiredControlTerminal
+import com.shilapi.xcertplay.transport.IphoneCarPlayConfiguration
 import com.shilapi.xcertplay.transport.IphoneUsbException
 import com.shilapi.xcertplay.transport.IphoneUsbHost
 import com.shilapi.xcertplay.transport.IphoneUsbMatcher
@@ -46,6 +48,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 sealed class CarPlayStatus {
     data object DiscoveringMfi : CarPlayStatus()
@@ -83,7 +86,7 @@ class CarPlayController(
     private val loadPairRecord: () -> LockdownPairRecord? = { null },
     private val savePairRecord: (LockdownPairRecord) -> Unit = {},
 ) : Closeable {
-    private enum class Phase { IDLE, MFI, IPHONE, REENUMERATION, CONFIGURING, DATAPATHS, CONTROL }
+    private enum class Phase { IDLE, MFI, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
     private val appContext = context.applicationContext
     private val usbManager = context.getSystemService(UsbManager::class.java)
@@ -101,6 +104,8 @@ class CarPlayController(
     private val hostId = UUID.randomUUID().toString()
     private val systemBuid = randomHex(20)
     private val lifecycleLock = Any()
+    private val permissionGrant = AtomicBoolean(false)
+    private var permissionPollGeneration = 0
 
     @Volatile private var closed = false
     @Volatile private var phase = Phase.IDLE
@@ -304,10 +309,15 @@ class CarPlayController(
         if (closed) return
         try {
             when (val request = iphoneHost.requestPermission(device)) {
-                is IphoneUsbHost.PermissionRequest.AlreadyGranted ->
+                is IphoneUsbHost.PermissionRequest.AlreadyGranted -> {
+                    permissionGrant.set(false)
                     onIphonePermission(IphoneUsbHost.PermissionResult.Granted(request.device))
-                is IphoneUsbHost.PermissionRequest.Requested ->
+                }
+                is IphoneUsbHost.PermissionRequest.Requested -> {
+                    permissionGrant.set(false)
                     onStatus(CarPlayStatus.RequestingIphonePermission)
+                    pollIphonePermission(device)
+                }
             }
         } catch (error: Throwable) {
             fail(error)
@@ -316,12 +326,45 @@ class CarPlayController(
 
     private fun onIphonePermission(result: IphoneUsbHost.PermissionResult) {
         when (result) {
-            is IphoneUsbHost.PermissionResult.Granted ->
-                if (phase == Phase.REENUMERATION) selectConfiguration(result.device)
+            is IphoneUsbHost.PermissionResult.Granted -> {
+                // The system broadcast and the polling fallback can both observe the grant.
+                if (!permissionGrant.compareAndSet(false, true)) return
+                permissionPollGeneration++
+                if (phase == Phase.REENUMERATION) openDataPaths(result.device)
                 else beginReenumeration(result.device)
-            is IphoneUsbHost.PermissionResult.Denied ->
+            }
+            is IphoneUsbHost.PermissionResult.Denied -> {
+                permissionGrant.set(true)
                 onStatus(CarPlayStatus.Failed("iPhone USB permission was denied"))
+            }
         }
+    }
+
+    /** Some Android builds grant the dialog without delivering the permission broadcast. */
+    private fun pollIphonePermission(device: UsbDevice) {
+        val generation = ++permissionPollGeneration
+        val deadlineNanos = System.nanoTime() + PERMISSION_POLL_TIMEOUT_MILLIS * 1_000_000L
+        val check = object : Runnable {
+            override fun run() {
+                if (closed || generation != permissionPollGeneration) return
+                if (usbManager.hasPermission(device)) {
+                    onIphonePermission(IphoneUsbHost.PermissionResult.Granted(device))
+                    return
+                }
+                if (System.nanoTime() >= deadlineNanos) {
+                    if (permissionGrant.compareAndSet(false, true)) {
+                        onStatus(
+                            CarPlayStatus.Failed(
+                                "iPhone USB permission was not granted; tap Reconnect iPhone to retry",
+                            ),
+                        )
+                    }
+                    return
+                }
+                mainHandler.postDelayed(this, PERMISSION_POLL_INTERVAL_MILLIS)
+            }
+        }
+        mainHandler.postDelayed(check, PERMISSION_POLL_INTERVAL_MILLIS)
     }
 
     private fun beginReenumeration(device: UsbDevice) {
@@ -331,8 +374,6 @@ class CarPlayController(
             when (transition) {
                 IphoneUsbHost.TransitionResult.ReenumerationRequested ->
                     onStatus(CarPlayStatus.WaitingForReenumeration)
-                IphoneUsbHost.TransitionResult.CarPlayConfigurationSelected ->
-                    selectConfiguration(device)
                 is IphoneUsbHost.TransitionResult.Failed -> fail(transition.error)
             }
         }
@@ -345,20 +386,9 @@ class CarPlayController(
         }
     }
 
-    private fun selectConfiguration(device: UsbDevice) {
-        phase = Phase.CONFIGURING
-        onStatus(CarPlayStatus.SelectingConfiguration)
-        iphoneHost.selectCarPlayConfigurationAsync(device, executor) { transition ->
-            when (transition) {
-                IphoneUsbHost.TransitionResult.CarPlayConfigurationSelected -> openDataPaths(device)
-                IphoneUsbHost.TransitionResult.ReenumerationRequested -> Unit
-                is IphoneUsbHost.TransitionResult.Failed -> fail(transition.error)
-            }
-        }
-    }
-
     private fun openDataPaths(device: UsbDevice) {
         phase = Phase.DATAPATHS
+        onStatus(CarPlayStatus.SelectingConfiguration)
         onStatus(CarPlayStatus.OpeningDataPaths)
         iphoneHost.openIap2UsbSessionAsync(device, executor) { result ->
             when (result) {
@@ -377,14 +407,18 @@ class CarPlayController(
     }
 
     private fun openNcm(device: UsbDevice): NcmUsbBridge {
-        val configuration = (0 until device.configurationCount)
-            .map(device::getConfiguration)
-            .firstOrNull { it.id == CARPLAY_CONFIGURATION_ID }
+        val configuration = IphoneCarPlayConfiguration.find(device)
             ?: throw IphoneUsbException.Protocol(
-                "iPhone does not expose configuration $CARPLAY_CONFIGURATION_ID",
+                "iPhone exposes no CarPlay configuration for NCM",
             )
         val function = NcmFunctionDiscovery.find(configuration)
             ?: throw IphoneUsbException.Protocol("iPhone configuration does not expose an NCM function")
+        Log.i(
+            IphoneCarPlayConfiguration.TAG,
+            "ncm config=${configuration.id} control=${function.control.id}/${function.control.alternateSetting}" +
+                " data=${function.data.id}/${function.data.alternateSetting}" +
+                " in=0x${function.bulkIn.address.toString(16)} out=0x${function.bulkOut.address.toString(16)}",
+        )
         val connection = usbManager.openDevice(device)
             ?: throw IphoneUsbException.DeviceUnavailable("Could not open the iPhone NCM connection")
         return NcmUsbBridge.open(connection, function)
@@ -562,10 +596,11 @@ class CarPlayController(
     }
 
     companion object {
-        private const val CARPLAY_CONFIGURATION_ID = 6
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
+        private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
+        private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
 
         private fun randomHex(bytes: Int): String {
             val data = ByteArray(bytes)

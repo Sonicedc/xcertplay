@@ -14,6 +14,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.hardware.usb.UsbRequest
 import android.os.Build
+import android.util.Log
 import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -83,9 +84,6 @@ class IphoneUsbHost(
     sealed class TransitionResult {
         /** The connection was closed; wait for a new matching attached device before continuing. */
         data object ReenumerationRequested : TransitionResult()
-
-        /** Configuration 6 was selected on the newly enumerated, authorized device. */
-        data object CarPlayConfigurationSelected : TransitionResult()
 
         data class Failed(val error: IphoneUsbException) : TransitionResult()
     }
@@ -168,35 +166,10 @@ class IphoneUsbHost(
     }
 
     /**
-     * Selects configuration 6 after the caller receives a newly enumerated, authorized iPhone.
-     * The connection is closed before the callback; this phase does not open iAP2 endpoints.
-     */
-    fun selectCarPlayConfigurationAsync(
-        device: UsbDevice,
-        executor: Executor,
-        callback: (TransitionResult) -> Unit,
-    ) {
-        executor.execute {
-            callback(runTransition(device) { connection ->
-                val configuration = findCarPlayConfiguration(device)
-                    ?: throw IphoneUsbException.Protocol(
-                        "Re-enumerated iPhone does not expose configuration $CARPLAY_CONFIGURATION_ID",
-                    )
-                if (!connection.setConfiguration(configuration)) {
-                    throw IphoneUsbException.DeviceUnavailable(
-                        "Android could not select iPhone configuration $CARPLAY_CONFIGURATION_ID",
-                    )
-                }
-                TransitionResult.CarPlayConfigurationSelected
-            })
-        }
-    }
-
-    /**
      * Opens LIVI's USBMUX bulk pipe on the re-enumerated iPhone.
      *
-     * This repeats configuration 6 selection on the newly opened Android connection, claims only
-     * USBMUX interface 1, and rejects any endpoint layout other than bulk OUT 0x04 and IN 0x85.
+     * This repeats CarPlay configuration selection on the newly opened Android connection and
+     * claims the Apple USB Multiplexor interface, preferring the LIVI bulk pair 0x04/0x85.
      * After a successful callback, it owns the returned session and must close it. If the callback
      * throws, this method closes the session before propagating the callback failure.
      */
@@ -266,54 +239,35 @@ class IphoneUsbHost(
             ?: throw IphoneUsbException.DeviceUnavailable("UsbManager could not open the iPhone")
         var claimedInterface: UsbInterface? = null
         try {
-            val configuration = findCarPlayConfiguration(device)
+            val configuration = IphoneCarPlayConfiguration.find(device)
                 ?: throw IphoneUsbException.Protocol(
-                    "Re-enumerated iPhone does not expose configuration $CARPLAY_CONFIGURATION_ID",
+                    "Re-enumerated iPhone exposes no USBMUX CarPlay configuration",
                 )
             if (!connection.setConfiguration(configuration)) {
-                throw IphoneUsbException.DeviceUnavailable(
-                    "Android could not select iPhone configuration $CARPLAY_CONFIGURATION_ID",
+                Log.w(
+                    IphoneCarPlayConfiguration.TAG,
+                    "setConfiguration ${configuration.id} reported failure; claiming anyway",
                 )
             }
-            val usbMux = findUsbMuxInterface(configuration)
-                ?: throw IphoneUsbException.Protocol("Configuration 6 does not expose USBMUX interface 1")
-            val endpoints = findUsbMuxEndpoints(usbMux)
-                ?: throw IphoneUsbException.Protocol("USBMUX interface 1 does not expose bulk 0x04/0x85")
+            val usbMux = IphoneCarPlayConfiguration.usbMuxInterface(configuration)
+                ?: throw IphoneUsbException.Protocol("CarPlay configuration exposes no USBMUX interface")
+            val endpoints = IphoneCarPlayConfiguration.usbMuxEndpoints(usbMux)
+                ?: throw IphoneUsbException.Protocol("USBMUX interface exposes no bulk endpoint pair")
+            Log.i(
+                IphoneCarPlayConfiguration.TAG,
+                "usbmux iface=${usbMux.id} alt=${usbMux.alternateSetting} " +
+                    "out=0x${endpoints.first.address.toString(16)} in=0x${endpoints.second.address.toString(16)}",
+            )
             if (!connection.claimInterface(usbMux, true)) {
                 throw IphoneUsbException.DeviceUnavailable("Android could not claim USBMUX interface 1")
             }
             claimedInterface = usbMux
-            return Iap2UsbSession(connection, endpoints.out, endpoints.`in`)
+            return Iap2UsbSession(connection, endpoints.first, endpoints.second)
         } catch (error: Throwable) {
             if (claimedInterface != null) connection.releaseInterface(claimedInterface)
             connection.close()
             throw error
         }
-    }
-
-    private fun findCarPlayConfiguration(device: UsbDevice): UsbConfiguration? =
-        (0 until device.configurationCount)
-            .map(device::getConfiguration)
-            .firstOrNull { it.id == CARPLAY_CONFIGURATION_ID }
-
-    private fun findUsbMuxInterface(configuration: UsbConfiguration): UsbInterface? =
-        (0 until configuration.interfaceCount)
-            .map(configuration::getInterface)
-            .firstOrNull { it.id == USBMUX_INTERFACE_ID }
-
-    private fun findUsbMuxEndpoints(usbInterface: UsbInterface): UsbMuxEndpoints? {
-        val endpoints = (0 until usbInterface.endpointCount).map(usbInterface::getEndpoint)
-        val out = endpoints.singleOrNull {
-            it.address == USBMUX_BULK_OUT_ADDRESS &&
-                it.direction == UsbConstants.USB_DIR_OUT &&
-                it.type == UsbConstants.USB_ENDPOINT_XFER_BULK
-        }
-        val input = endpoints.singleOrNull {
-            it.address == USBMUX_BULK_IN_ADDRESS &&
-                it.direction == UsbConstants.USB_DIR_IN &&
-                it.type == UsbConstants.USB_ENDPOINT_XFER_BULK
-        }
-        return if (out != null && input != null) UsbMuxEndpoints(out, input) else null
     }
 
     private fun requireConfiguredDevice(device: UsbDevice) {
@@ -358,15 +312,10 @@ class IphoneUsbHost(
         private const val USB_VENDOR_DEVICE_IN = 0xc0
         private const val CARPLAY_CONFIGURATION_REQUEST = 0x52
         private const val CARPLAY_CONFIGURATION_INDEX = 0x0004
-        private const val CARPLAY_CONFIGURATION_ID = 6
         private const val VENDOR_RESPONSE_LENGTH = 1
         private const val CONTROL_TRANSFER_TIMEOUT_MILLIS = 1_000
-        private const val USBMUX_INTERFACE_ID = 1
-        private const val USBMUX_BULK_OUT_ADDRESS = 0x04
-        private const val USBMUX_BULK_IN_ADDRESS = 0x85
     }
 
-    private data class UsbMuxEndpoints(val out: UsbEndpoint, val `in`: UsbEndpoint)
 }
 
 /**

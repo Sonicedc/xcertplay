@@ -22,6 +22,9 @@ class Iap2UsbMuxHost private constructor(
     private var nextMuxSequence = 0
     private var nextSourcePort = FIRST_SOURCE_PORT
     private lateinit var readerThread: Thread
+    private var receiveBuffer = ByteArray(0)
+
+    private data class MuxFrame(val protocol: Int, val payload: ByteArray)
 
     /** Opens a TCP byte stream to the iPhone service on [destinationPort]. */
     fun connect(
@@ -102,11 +105,49 @@ class Iap2UsbMuxHost private constructor(
         putU32(version, 4, VERSION_MESSAGE_BYTES)
         putU32(version, 8, USBMUX_VERSION)
         pipe.write(version, HANDSHAKE_TIMEOUT_MILLIS.toInt())
-        pipe.read(HANDSHAKE_TIMEOUT_MILLIS)
+        // Parse the version reply as a real frame; any bytes that arrive with it stay buffered for
+        // the reader thread instead of being discarded.
+        while (true) {
+            val frame = takeFrame(HANDSHAKE_TIMEOUT_MILLIS)
+                ?: throw IphoneUsbException.TimedOut("Timed out waiting for the USBMUX version reply")
+            if (frame.protocol == PROTOCOL_VERSION_REPLY) break
+        }
         sendFrame(PROTOCOL_SETUP, byteArrayOf(SETUP_VALUE.toByte()))
         readerThread = Thread(::readerLoop, "iap2-usbmux-reader").apply {
             isDaemon = true
             start()
+        }
+    }
+
+    /** Reads one complete USBMUX frame, keeping partial data buffered across reads. */
+    private fun takeFrame(timeoutMillis: Long): MuxFrame? {
+        val deadline = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
+        while (true) {
+            synchronized(stateLock) {
+                if (closed) throw IphoneUsbException.DeviceUnavailable("USBMUX host is closed")
+                if (receiveBuffer.size >= MUX_HEADER_BYTES) {
+                    val length = readU32(receiveBuffer, 4)
+                    if (length < MUX_HEADER_BYTES || length > MAX_FRAME_BYTES) {
+                        throw IphoneUsbException.Protocol("Invalid USBMUX frame length $length")
+                    }
+                    if (receiveBuffer.size >= length) {
+                        if (readU32(receiveBuffer, 8) != MUX_MAGIC) {
+                            throw IphoneUsbException.Protocol("Invalid USBMUX frame magic")
+                        }
+                        val protocol = readU32(receiveBuffer, 0)
+                        val payload = receiveBuffer.copyOfRange(MUX_HEADER_BYTES, length)
+                        receiveBuffer = receiveBuffer.copyOfRange(length, receiveBuffer.size)
+                        return MuxFrame(protocol, payload)
+                    }
+                }
+            }
+            val remainingNanos = deadline - System.nanoTime()
+            if (remainingNanos <= 0) return null
+            val remainingMillis = (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND
+            val bytes = pipe.read(remainingMillis) ?: continue
+            synchronized(stateLock) {
+                receiveBuffer += bytes
+            }
         }
     }
 
@@ -133,30 +174,13 @@ class Iap2UsbMuxHost private constructor(
     }
 
     private fun readerLoop() {
-        var buffered = ByteArray(0)
         try {
             while (true) {
                 synchronized(stateLock) {
                     if (closed) return
                 }
-                val bytes = pipe.read(readTimeoutMillis) ?: continue
-                buffered += bytes
-                var offset = 0
-                while (buffered.size - offset >= MUX_HEADER_BYTES) {
-                    val frameLength = readU32(buffered, offset + 4)
-                    if (frameLength < MUX_HEADER_BYTES || frameLength > MAX_FRAME_BYTES) {
-                        throw IphoneUsbException.Protocol("Invalid USBMUX frame length $frameLength")
-                    }
-                    if (buffered.size - offset < frameLength) break
-                    if (readU32(buffered, offset + 8) != MUX_MAGIC) {
-                        throw IphoneUsbException.Protocol("Invalid USBMUX frame magic")
-                    }
-                    if (readU32(buffered, offset) == PROTOCOL_TCP) {
-                        dispatchTcp(buffered, offset + MUX_HEADER_BYTES, frameLength - MUX_HEADER_BYTES)
-                    }
-                    offset += frameLength
-                }
-                if (offset != 0) buffered = buffered.copyOfRange(offset, buffered.size)
+                val frame = takeFrame(readTimeoutMillis) ?: continue
+                if (frame.protocol == PROTOCOL_TCP) dispatchTcp(frame.payload)
             }
         } catch (error: IphoneUsbException) {
             fail(error)
@@ -165,7 +189,9 @@ class Iap2UsbMuxHost private constructor(
         }
     }
 
-    private fun dispatchTcp(frame: ByteArray, offset: Int, length: Int) {
+    private fun dispatchTcp(frame: ByteArray) {
+        val offset = 0
+        val length = frame.size
         if (length < TCP_HEADER_BYTES) {
             throw IphoneUsbException.Protocol("USBMUX TCP frame is shorter than its header")
         }
@@ -211,12 +237,14 @@ class Iap2UsbMuxHost private constructor(
         const val LOCKDOWN_PORT = 62078
 
         private const val PROTOCOL_VERSION = 0
+        private const val PROTOCOL_VERSION_REPLY = 1
         private const val PROTOCOL_SETUP = 2
         private const val PROTOCOL_TCP = 6
         private const val USBMUX_VERSION = 2
         private const val SETUP_VALUE = 0x07
         private const val MUX_MAGIC = 0xfeedface.toInt()
         private const val VERSION_MESSAGE_BYTES = 20
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val MUX_HEADER_BYTES = 16
         private const val TCP_HEADER_BYTES = 20
         private const val TCP_WINDOW_FIELD = 512

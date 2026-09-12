@@ -15,6 +15,9 @@ object NcmFunctionDiscovery {
     const val CONTROL_CLASS = 0x02
     const val CONTROL_SUBCLASS = 0x0d
     const val DATA_CLASS = 0x0a
+    const val APPLE_ETHERNET_CLASS = 0xff
+    const val APPLE_ETHERNET_SUBCLASS = 0xfd
+    const val APPLE_ETHERNET_PROTOCOL = 0x01
     const val DATA_ALTERNATE_SETTING = 1
 
     data class NcmFunction(
@@ -25,6 +28,11 @@ object NcmFunctionDiscovery {
     )
 
     fun find(configuration: UsbConfiguration): NcmFunction? {
+        findCdcNcm(configuration)?.let { return it }
+        return findAppleEthernet(configuration)
+    }
+
+    private fun findCdcNcm(configuration: UsbConfiguration): NcmFunction? {
         val control = interfaces(configuration).firstOrNull {
             it.interfaceClass == CONTROL_CLASS && it.interfaceSubclass == CONTROL_SUBCLASS
         } ?: return null
@@ -32,6 +40,22 @@ object NcmFunctionDiscovery {
             .filter { it.interfaceClass == DATA_CLASS && bulkEndpoints(it) != null }
             .minByOrNull { if (it.alternateSetting == DATA_ALTERNATE_SETTING) 0 else 1 }
             ?: return null
+        val endpoints = bulkEndpoints(data) ?: return null
+        return NcmFunction(control, data, endpoints.first, endpoints.second)
+    }
+
+    /**
+     * Apple's vendor-specific Ethernet function: alt 0 is the control interface without
+     * endpoints, and the lowest non-zero alternate setting carries the bulk pair.
+     */
+    private fun findAppleEthernet(configuration: UsbConfiguration): NcmFunction? {
+        val apple = interfaces(configuration).filter {
+            it.interfaceClass == APPLE_ETHERNET_CLASS &&
+                it.interfaceSubclass == APPLE_ETHERNET_SUBCLASS &&
+                it.interfaceProtocol == APPLE_ETHERNET_PROTOCOL
+        }
+        val control = apple.firstOrNull { it.endpointCount == 0 } ?: return null
+        val data = apple.filter { bulkEndpoints(it) != null }.minByOrNull { it.alternateSetting } ?: return null
         val endpoints = bulkEndpoints(data) ?: return null
         return NcmFunction(control, data, endpoints.first, endpoints.second)
     }

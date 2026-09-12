@@ -4,6 +4,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbRequest
+import android.util.Log
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
@@ -214,15 +215,42 @@ class NcmUsbBridge internal constructor(
         fun open(connection: UsbDeviceConnection, function: NcmFunctionDiscovery.NcmFunction): NcmUsbBridge {
             val claimed = ArrayList<UsbInterface>(2)
             try {
-                if (!connection.claimInterface(function.control, true)) {
-                    throw IphoneUsbException.DeviceUnavailable("Android could not claim the NCM control interface")
+                // Apple's Ethernet function exposes control and data as alternate settings of the
+                // same interface id, so it must be claimed once and switched with setInterface.
+                val sameInterface = function.control.id == function.data.id
+                val first = if (sameInterface) function.data else function.control
+                val firstClaimed = connection.claimInterface(first, true)
+                Log.i(
+                    IphoneCarPlayConfiguration.TAG,
+                    "claim iface=${first.id}/${first.alternateSetting} class=${first.interfaceClass}" +
+                        " subclass=${first.interfaceSubclass} proto=${first.interfaceProtocol} ok=$firstClaimed",
+                )
+                if (!firstClaimed) {
+                    throw IphoneUsbException.DeviceUnavailable(
+                        "Android could not claim the NCM interface ${first.id}",
+                    )
                 }
-                claimed.add(function.control)
-                if (!connection.claimInterface(function.data, true)) {
-                    throw IphoneUsbException.DeviceUnavailable("Android could not claim the NCM data interface")
+                claimed.add(first)
+                if (!sameInterface) {
+                    val dataClaimed = connection.claimInterface(function.data, true)
+                    Log.i(
+                        IphoneCarPlayConfiguration.TAG,
+                        "claim iface=${function.data.id}/${function.data.alternateSetting}" +
+                            " class=${function.data.interfaceClass} ok=$dataClaimed",
+                    )
+                    if (!dataClaimed) {
+                        throw IphoneUsbException.DeviceUnavailable(
+                            "Android could not claim the NCM data interface ${function.data.id}",
+                        )
+                    }
+                    claimed.add(function.data)
                 }
-                claimed.add(function.data)
-                if (!connection.setInterface(function.data)) {
+                val altSelected = connection.setInterface(function.data)
+                Log.i(
+                    IphoneCarPlayConfiguration.TAG,
+                    "setInterface iface=${function.data.id}/${function.data.alternateSetting} ok=$altSelected",
+                )
+                if (!altSelected) {
                     throw IphoneUsbException.DeviceUnavailable(
                         "Android could not select the NCM data alternate setting",
                     )
