@@ -47,9 +47,11 @@ class CarPlayVpnService : VpnService() {
     private var serverSocket: ServerSocket? = null
     private var bridge: Ipv6NcmBridge? = null
     private var tun: ParcelFileDescriptor? = null
+    private var attachGeneration = 0
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    @Synchronized
     fun attach(
         ncm: NcmUsbBridge,
         linkLocal: String,
@@ -61,7 +63,12 @@ class CarPlayVpnService : VpnService() {
         listener: AirPlaySessionListener,
         media: AirPlayMediaHandler,
     ): AttachResult {
-        if (!active.compareAndSet(false, true)) return AttachResult.AlreadyStarted
+        if (active.get()) {
+            Log.i(TAG, "replacing stale NCM/VPN attachment")
+            releaseLocked()
+        }
+        active.set(true)
+        val generation = ++attachGeneration
         return try {
             val address = InetAddress.getByName(linkLocal)
             if (address !is Inet6Address || !address.isLinkLocalAddress) {
@@ -78,7 +85,9 @@ class CarPlayVpnService : VpnService() {
                 ?: throw IOException("VpnService.establish returned null")
             tun = tunFd
 
-            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error -> onTransportError(error) }
+            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
+                onTransportError(generation, error)
+            }
             ipv6Bridge.start()
             bridge = ipv6Bridge
 
@@ -94,13 +103,19 @@ class CarPlayVpnService : VpnService() {
             }
             AttachResult.Started
         } catch (error: Exception) {
-            release()
+            releaseLocked()
             AttachResult.Failed(error.message ?: error.javaClass.simpleName)
         }
     }
 
+    /** Releases the active AirPlay listener, VPN and NCM transport while the service stays bound. */
+    @Synchronized
+    fun detach() {
+        releaseLocked()
+    }
+
     override fun onDestroy() {
-        release()
+        detach()
         super.onDestroy()
     }
 
@@ -150,11 +165,14 @@ class CarPlayVpnService : VpnService() {
         synchronized(sessionsLock) { sessions.remove(session) }
     }
 
-    private fun onTransportError(error: Throwable) {
+    private fun onTransportError(generation: Int, error: Throwable) {
         Log.e(TAG, "NCM/VPN transport stopped: ${error.message}", error)
         Thread(
             {
-                release()
+                synchronized(this) {
+                    if (generation != attachGeneration) return@Thread
+                    releaseLocked()
+                }
                 stopSelf()
             },
             "airplay-teardown",
@@ -164,7 +182,9 @@ class CarPlayVpnService : VpnService() {
         }
     }
 
-    private fun release() {
+    /** Caller must hold this service's monitor. */
+    private fun releaseLocked() {
+        attachGeneration += 1
         active.set(false)
         serverSocket?.close()
         serverSocket = null

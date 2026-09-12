@@ -19,10 +19,11 @@
 
         <activity
             android:name=".CarPlayHostActivity"
-            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="landscape"
+            android:resizeableActivity="true"
+            android:screenOrientation="fullSensor"
             android:theme="@style/Theme.Xcertplay"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>

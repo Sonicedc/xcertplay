@@ -100,6 +100,20 @@ object AirPlayPersistence {
             .apply()
     }
 
+    fun clearLockdownRecord(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .remove(KEY_LOCKDOWN_HOST_ID)
+            .remove(KEY_LOCKDOWN_SYSTEM_BUID)
+            .remove(KEY_LOCKDOWN_WIFI_MAC)
+            .remove(KEY_LOCKDOWN_DEVICE_PUBLIC)
+            .remove(KEY_LOCKDOWN_DEVICE_CERT)
+            .remove(KEY_LOCKDOWN_HOST_PRIVATE)
+            .remove(KEY_LOCKDOWN_HOST_CERT)
+            .remove(KEY_LOCKDOWN_ROOT_PRIVATE)
+            .remove(KEY_LOCKDOWN_ROOT_CERT)
+            .apply()
+    }
+
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private fun String.decodeHex(): ByteArray {

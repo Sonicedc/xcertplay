@@ -85,6 +85,7 @@ class CarPlayController(
     private val reportStatus: (CarPlayStatus) -> Unit,
     private val loadPairRecord: () -> LockdownPairRecord? = { null },
     private val savePairRecord: (LockdownPairRecord) -> Unit = {},
+    private val clearPairRecord: () -> Unit = {},
 ) : Closeable {
     private enum class Phase { IDLE, MFI, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
@@ -122,6 +123,7 @@ class CarPlayController(
     private var attachCloseable: Closeable? = null
     private var ch341PermissionCloseable: Closeable? = null
     private var vpnLatch = CountDownLatch(1)
+    private val teardownComplete = CountDownLatch(1)
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -191,21 +193,44 @@ class CarPlayController(
             closed = true
         }
         closeReceivers()
+        permissionPollGeneration += 1
+        val service = vpnService
         unbindVpn()
         Thread(
             {
-                csm?.close()
-                csm = null
-                mux?.close()
-                mux = null
-                mfiSession?.close()
-                mfiSession = null
-                executor.shutdownNow()
+                try {
+                    closeBestEffort("CSM") { csm?.close() }
+                    csm = null
+                    closeBestEffort("USBMUX") { mux?.close() }
+                    mux = null
+                    closeBestEffort("VPN/NCM") { service?.detach() }
+                    closeBestEffort("MFi") { mfiSession?.close() }
+                    mfiSession = null
+                } finally {
+                    executor.shutdownNow()
+                    try {
+                        executor.awaitTermination(EXECUTOR_CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                    teardownComplete.countDown()
+                }
             },
             "xcertplay-controller-teardown",
         ).apply {
             isDaemon = true
             start()
+        }
+    }
+
+    /** Waits for USB, iAP2, MFi and VPN teardown; intended for a non-main lifecycle thread. */
+    fun awaitClosed(timeoutMillis: Long): Boolean {
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        return try {
+            teardownComplete.await(timeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
         }
     }
 
@@ -457,21 +482,25 @@ class CarPlayController(
 
     private fun runStack(usbSession: Iap2UsbSession, ncm: NcmUsbBridge) {
         phase = Phase.CONTROL
+        var ncmOwnedLocally = true
         try {
+            if (closed) return
             val mux = Iap2UsbMuxHost.open(usbSession)
             this.mux = mux
             onStatus(CarPlayStatus.Pairing)
-            val pairRecord = loadPairRecord() ?: LockdownPairingClient(mux)
-                .pair(
-                    label = config.label,
-                    hostId = hostId,
-                    systemBuid = systemBuid,
-                    totalTimeoutMillis = PAIR_TIMEOUT_MILLIS,
-                )
-                .pairRecord
-                .also(savePairRecord)
+            val pairingClient = LockdownPairingClient(mux)
+            var pairRecord = loadPairRecord() ?: pairNewRecord(pairingClient)
             onStatus(CarPlayStatus.ConnectingControl)
-            val carkit = LockdownCarKitClient(mux).open(pairRecord, config.label)
+            val carKitClient = LockdownCarKitClient(mux)
+            val carkit = try {
+                carKitClient.open(pairRecord, config.label)
+            } catch (error: Throwable) {
+                if (!isInvalidPairRecord(error)) throw error
+                Log.i(IphoneCarPlayConfiguration.TAG, "saved lockdown pair record rejected; pairing again")
+                clearPairRecord()
+                pairRecord = pairNewRecord(pairingClient)
+                carKitClient.open(pairRecord, config.label)
+            }
             val csm = Iap2CsmChannel.open(carkit)
             this.csm = csm
 
@@ -482,6 +511,11 @@ class CarPlayController(
             )
             if (!attachVpn(ncm, ncmHostMac)) {
                 throw IphoneUsbException.DeviceUnavailable("Could not attach the NCM/VPN AirPlay transport")
+            }
+            ncmOwnedLocally = false
+            if (closed) {
+                vpnService?.detach()
+                return
             }
 
             val mfi = mfiSession?.client
@@ -510,7 +544,36 @@ class CarPlayController(
                 },
             )
         } catch (error: Throwable) {
+            if (!ncmOwnedLocally) vpnService?.detach()
             fail(error)
+        } finally {
+            if (ncmOwnedLocally) ncm.close()
+        }
+    }
+
+    private fun pairNewRecord(client: LockdownPairingClient): LockdownPairRecord =
+        client.pair(
+            label = config.label,
+            hostId = hostId,
+            systemBuid = systemBuid,
+            totalTimeoutMillis = PAIR_TIMEOUT_MILLIS,
+            isCancelled = { closed },
+        ).pairRecord.also(savePairRecord)
+
+    private fun isInvalidPairRecord(error: Throwable): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause.message?.contains("InvalidPairRecord", ignoreCase = true) == true) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    private fun closeBestEffort(name: String, close: () -> Unit) {
+        try {
+            close()
+        } catch (error: Throwable) {
+            Log.w(IphoneCarPlayConfiguration.TAG, "$name teardown failed: ${error.message}", error)
         }
     }
 
@@ -568,29 +631,25 @@ class CarPlayController(
     private fun bindVpn() {
         if (vpnBound) return
         vpnBound = true
-        mainHandler.post {
-            try {
-                val intent = Intent(appContext, CarPlayVpnService::class.java)
-                if (!appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
-                    vpnBound = false
-                    vpnLatch.countDown()
-                }
-            } catch (_: Throwable) {
+        try {
+            val intent = Intent(appContext, CarPlayVpnService::class.java)
+            if (!appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
                 vpnBound = false
                 vpnLatch.countDown()
             }
+        } catch (_: Throwable) {
+            vpnBound = false
+            vpnLatch.countDown()
         }
     }
 
     private fun unbindVpn() {
         if (!vpnBound) return
         vpnBound = false
-        mainHandler.post {
-            try {
-                appContext.unbindService(serviceConnection)
-            } catch (_: Exception) {
-                // The service may have already been unbound.
-            }
+        try {
+            appContext.unbindService(serviceConnection)
+        } catch (_: Exception) {
+            // The service may have already been unbound.
         }
         vpnService = null
     }
@@ -641,6 +700,7 @@ class CarPlayController(
         private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
+        private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
 
     }
 }
