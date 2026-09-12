@@ -517,24 +517,26 @@ $env:OS = "Windows_NT"
 .\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
 ```
 
-`shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary JVM test exercising the
+The `shared` unit-test suite passes with 0 failures / 0 errors. A temporary JVM test exercising the
 LIVI audio RTP layout, screen frame header AAD, avcC/hvcC config detection, audio-format mapping,
-and NTP clock initialization passed and was then removed to preserve the curated test count.
+and NTP clock initialization passed and was then removed.
 
 ## Stage 8H: Android media rendering (code complete, hardware unverified)
 
 - `AndroidMediaSink` implements the `MediaSink` seam with a MediaCodec H.264/H.265 decoder bound
   to a caller-supplied `Surface`, plus one MediaCodec/AudioTrack audio renderer per stream type.
-- `MediaCodecSupport` converts CarPlay's length-prefixed screen NALs to Annex B, passes raw SPS/PPS
-  (avcC) or the hvcC record as Android CSD, extracts RFC 3640 AAC access units and wraps them in
-  ADTS, and byte-swaps the wired big-endian LPCM samples for AudioTrack. Opus packets are skipped:
-  Android MediaCodec has no built-in Opus decoder, so a native decoder remains a gap.
+- `MediaCodecSupport` converts CarPlay's length-prefixed screen NALs to Annex B, converts avcC and
+  hvcC records to the CSD expected by Android MediaCodec, extracts RFC 3640 AAC access units and
+  wraps them in ADTS, and byte-swaps the wired big-endian LPCM samples for AudioTrack. Opus packets
+  are skipped: Android MediaCodec has no built-in Opus decoder, so a native decoder remains a gap.
+- HEVC/H.265 is enabled by default, persisted in `AirPlayPersistence`, and exposed as a switch in
+  the three-finger settings menu. A fresh handshake advertises `hevcInfo` and the `hevc` enabled
+  feature when selected; switching the value takes effect when the settings menu closes.
 - `CarPlayTouchMapper` normalizes Android MotionEvents into up to two `AirPlayContact`s for
   `AirPlaySession.sendTouch`.
 
-This fills the rendering seam only. It does not create the full-screen SurfaceView host or the
-USB/NCM/iAP2 orchestration that constructs `CarPlayMediaEngine`, and it has not been verified
-against an iPhone or vehicle head unit.
+The HEVC negotiation, hvcC conversion, persistence, and menu path are build- and unit-test
+verified, but the complete path has not been verified against an iPhone or vehicle head unit.
 
 ### Build and unit tests
 

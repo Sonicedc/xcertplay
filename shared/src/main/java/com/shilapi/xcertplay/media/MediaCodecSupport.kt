@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay.media
 
+import java.io.ByteArrayOutputStream
+
 /**
  * Pure byte helpers that convert the CarPlay screen/audio payloads into the
  * records Android MediaCodec and AudioTrack expect. Kept free of Android types
@@ -17,6 +19,39 @@ object MediaCodecSupport {
         if (cursor >= codecData.size) return emptySet()
         val pps = readParameterSets(codecData, cursor + 1, codecData[cursor].toInt() and 0xff)
         return (sps.firstOrNull() ?: ByteArray(0)) to (pps.firstOrNull() ?: ByteArray(0))
+    }
+
+    /**
+     * Converts an HEVCDecoderConfigurationRecord (hvcC) into Annex B VPS/SPS/PPS CSD.
+     *
+     * Android video decoders expect the initialization data as NAL units with start codes,
+     * not as the raw ISO-BMFF hvcC record.
+     */
+    fun hevcCodecSpecificData(codecData: ByteArray): ByteArray {
+        if (codecData.size < HEVC_FIXED_RECORD_SIZE || codecData[0].toInt() != 1) {
+            return ByteArray(0)
+        }
+
+        var cursor = HEVC_ARRAY_COUNT_OFFSET
+        val arrayCount = codecData[cursor++].toInt() and 0xff
+        val output = ByteArrayOutputStream()
+        repeat(arrayCount) {
+            if (cursor >= codecData.size) return ByteArray(0)
+            cursor += 1 // array_completeness, reserved, and nal_unit_type
+            if (cursor + 2 > codecData.size) return ByteArray(0)
+            val nalUnitCount = readU16Be(codecData, cursor)
+            cursor += 2
+            repeat(nalUnitCount) {
+                if (cursor + 2 > codecData.size) return ByteArray(0)
+                val nalUnitLength = readU16Be(codecData, cursor)
+                cursor += 2
+                if (cursor + nalUnitLength > codecData.size) return ByteArray(0)
+                output.write(START_CODE)
+                output.write(codecData, cursor, nalUnitLength)
+                cursor += nalUnitLength
+            }
+        }
+        return output.toByteArray()
     }
 
     /** Converts CarPlay's length-prefixed NAL units into an Annex B byte stream. */
@@ -115,4 +150,6 @@ object MediaCodecSupport {
             ((source[offset + 2].toInt() and 0xff) shl 8) or
             (source[offset + 3].toInt() and 0xff)
 
+    private const val HEVC_FIXED_RECORD_SIZE = 23
+    private const val HEVC_ARRAY_COUNT_OFFSET = 22
 }

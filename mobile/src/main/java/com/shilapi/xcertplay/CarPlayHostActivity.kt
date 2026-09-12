@@ -22,6 +22,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -100,6 +101,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var activeDisplaySize: DisplaySize? = null
     private var pendingDisplaySize: DisplaySize? = null
     private var displayScaleTenths = CarPlayDisplayScale.DEFAULT_TENTHS
+    private var hevcEnabled = true
     private var awaitingVpnConsent = false
     private var vpnReady = false
     private var userLeaving = false
@@ -147,6 +149,7 @@ class CarPlayHostActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         airPlayIdentity = AirPlayPersistence.loadIdentity(this)
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
+        hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
         setContentView(buildContentView())
         hideSystemBars()
         onBackPressedDispatcher.addCallback(
@@ -400,6 +403,52 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
         )
 
+        val hevcRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        hevcRow.addView(
+            menuText("HEVC (H.265)", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val hevcSwitch = Switch(this).apply {
+            isChecked = hevcEnabled
+            contentDescription = "HEVC H.265 video transport"
+            showText = false
+            thumbTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+            )
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
+            )
+            setOnCheckedChangeListener { _, checked ->
+                if (hevcEnabled == checked) return@setOnCheckedChangeListener
+                hevcEnabled = checked
+                AirPlayPersistence.saveHevcEnabled(this@CarPlayHostActivity, hevcEnabled)
+                appendLog(
+                    "HEVC (H.265) ${if (hevcEnabled) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                updateResolutionMenu()
+            }
+        }
+        hevcRow.addView(
+            hevcSwitch,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        content.addView(
+            hevcRow,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(30) },
+        )
+
         val preview = menuText("", 17f, MENU_SECONDARY)
         content.addView(
             preview,
@@ -466,7 +515,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun updateResolutionMenu() {
         resolutionValueView?.text = CarPlayDisplayScale.label(displayScaleTenths)
         val native = activeDisplaySize
-        resolutionPreviewView?.text = if (native == null) {
+        val resolution = if (native == null) {
             "Handshake resolution: waiting for display"
         } else {
             val negotiated = CarPlayDisplayScale.apply(
@@ -476,6 +525,8 @@ class CarPlayHostActivity : ComponentActivity() {
             "Handshake resolution: ${native.width} x ${native.height} -> " +
                 "${negotiated.widthPixels} x ${negotiated.heightPixels}"
         }
+        resolutionPreviewView?.text =
+            "$resolution\nVideo transport: ${if (hevcEnabled) "HEVC (H.265)" else "H.264"}"
     }
 
     private fun createAirPlayConfig(size: DisplaySize): AirPlayConfig {
@@ -489,6 +540,7 @@ class CarPlayHostActivity : ComponentActivity() {
             btMac = "02:00:00:00:00:01",
             sourceVersion = "950.7.1",
             main = display,
+            hevc = hevcEnabled,
         )
     }
 
@@ -500,13 +552,15 @@ class CarPlayHostActivity : ComponentActivity() {
         appendLog(
             "Starting CarPlay controller at ${size.width}x${size.height} -> " +
                 "${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
-                "(${CarPlayDisplayScale.label(displayScaleTenths)})",
+                "(${CarPlayDisplayScale.label(displayScaleTenths)}) " +
+                "video=${if (airPlayConfig.hevc) "HEVC" else "H.264"}",
         )
         Log.i(
             TAG,
             "starting controller display=${size.width}x${size.height} " +
                 "negotiated=${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
-                "scale=${CarPlayDisplayScale.label(displayScaleTenths)}",
+                "scale=${CarPlayDisplayScale.label(displayScaleTenths)} " +
+                "hevc=${airPlayConfig.hevc}",
         )
         val renderer = AndroidMediaSink(
             surface = null,
@@ -677,7 +731,8 @@ class CarPlayHostActivity : ComponentActivity() {
         logLines.clear()
         appendLog(
             "Settings closed; starting a fresh handshake at " +
-                CarPlayDisplayScale.label(displayScaleTenths),
+                "${CarPlayDisplayScale.label(displayScaleTenths)} with " +
+                (if (hevcEnabled) "HEVC (H.265)" else "H.264"),
         )
         if (handshakeResetInProgress) {
             startAfterHandshakeReset = true
@@ -837,6 +892,8 @@ class CarPlayHostActivity : ComponentActivity() {
         val MENU_BACKGROUND = Color.rgb(12, 16, 19)
         val MENU_SECONDARY = Color.rgb(170, 180, 190)
         val MENU_ACCENT = Color.rgb(127, 205, 154)
+        val MENU_ACCENT_TRACK = Color.rgb(78, 143, 102)
+        val MENU_TRACK_OFF = Color.rgb(64, 74, 80)
         val MENU_BUTTON_TEXT = Color.rgb(8, 17, 11)
     }
 

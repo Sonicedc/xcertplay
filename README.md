@@ -191,10 +191,17 @@ This has not been verified against an iPhone or vehicle head unit.
 
 `AndroidMediaSink` implements the `MediaSink` rendering seam: a MediaCodec H.264/H.265 decoder on
 a caller-provided `Surface`, plus AAC-LC and LPCM playback through MediaCodec/AudioTrack.
-`MediaCodecSupport` handles avcC/hvcC CSD, Annex B framing, RFC 3640 AAC access-unit extraction
+`MediaCodecSupport` converts avcC and hvcC records into the Annex B CSD expected by MediaCodec,
+handles Annex B framing, RFC 3640 AAC access-unit extraction
 and ADTS wrapping, and wired LPCM byte-swapping. Opus packets are skipped because Android
 MediaCodec has no built-in Opus decoder; it remains a native-decoder gap. `CarPlayTouchMapper`
 turns Android MotionEvents into CarPlay touch contacts for `AirPlaySession.sendTouch`.
+
+HEVC/H.265 transport is enabled by default and can be switched off in the three-finger settings
+menu. The preference is persisted, and the next AirPlay handshake advertises `hevcInfo` plus the
+`hevc` enabled feature only when selected. HEVC frames are decoded through the same
+length-prefixed-to-Annex-B path as H.264. This path is build- and unit-test verified but has not
+been verified against an iPhone or vehicle head unit.
 
 This is the rendering component only. The full-screen SurfaceView host and the USB/NCM/iAP2
 orchestration that feeds it are now wired by `CarPlayHostActivity` and `CarPlayController`, and

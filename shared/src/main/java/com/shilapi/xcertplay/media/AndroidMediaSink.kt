@@ -150,7 +150,8 @@ private class VideoDecoder(
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
         }
         if (codec == VideoCodec.H265) {
-            if (codecData.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(codecData))
+            val csd = MediaCodecSupport.hevcCodecSpecificData(codecData)
+            if (csd.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(csd))
         } else {
             val (sps, pps) = MediaCodecSupport.avcParameterSets(codecData)
             if (sps.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
