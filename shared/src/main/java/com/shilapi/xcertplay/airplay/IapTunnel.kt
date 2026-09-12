@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
 class IapTunnel(private val readKey: ByteArray) : Closeable {
     interface Listener {
         fun onIap(bytes: ByteArray) {}
+        fun onClosed(cause: Throwable?) {}
     }
 
     private val closed = AtomicBoolean(false)
@@ -49,14 +50,15 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
             val accepted = bound.accept()
             socket = accepted
             run(accepted)
-        } catch (_: Exception) {
-            // Listener closed during teardown.
+        } catch (error: Exception) {
+            if (!closed.get()) listener.onClosed(error)
         }
     }
 
     private fun run(sock: Socket) {
         var ciphertext = ByteArray(0)
         var plaintext = ByteArray(0)
+        var failure: Throwable? = null
         try {
             val input = sock.getInputStream()
             val buffer = ByteArray(READ_CHUNK_BYTES)
@@ -69,11 +71,12 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
                 ciphertext = decrypted.second
                 plaintext = parsePackages(plaintext)
             }
-        } catch (_: Exception) {
-            // Socket closed or peer disconnected.
+        } catch (error: Exception) {
+            failure = error
         } finally {
             if (socket === sock) socket = null
             safeClose(sock)
+            if (!closed.get()) listener.onClosed(failure)
         }
     }
 
@@ -86,15 +89,10 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
             if (buffer.size - offset < frameLength) break
             val aad = buffer.copyOfRange(offset, offset + FRAME_HEADER_LEN)
             val sealed = buffer.copyOfRange(offset + FRAME_HEADER_LEN, offset + frameLength)
-            val plain = try {
-                val opened = AirPlayCrypto.chachaOpen(
-                    readKey, AirPlayCrypto.nonce64(readCounter.get()), sealed, aad,
-                )
-                readCounter.incrementAndGet()
-                opened
-            } catch (_: Exception) {
-                break
-            }
+            val plain = AirPlayCrypto.chachaOpen(
+                readKey, AirPlayCrypto.nonce64(readCounter.get()), sealed, aad,
+            )
+            readCounter.incrementAndGet()
             output.add(plain)
             offset += frameLength
         }

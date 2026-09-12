@@ -24,6 +24,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
         fun onFrame(naluBytes: ByteArray) {}
+        fun onClosed(cause: Throwable?) {}
     }
 
     private val closed = AtomicBoolean(false)
@@ -56,12 +57,13 @@ class ScreenStream(private val key: ByteArray) : Closeable {
             val accepted = bound.accept()
             socket = accepted
             run(accepted)
-        } catch (_: Exception) {
-            // Listener closed during teardown.
+        } catch (error: Exception) {
+            if (!closed.get()) listener.onClosed(error)
         }
     }
 
     private fun run(sock: Socket) {
+        var failure: Throwable? = null
         try {
             val input = sock.getInputStream()
             while (!closed.get()) {
@@ -71,11 +73,12 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                 val body = readFully(input, bodySize) ?: break
                 onMessage(header, body)
             }
-        } catch (_: Exception) {
-            // Socket closed or peer disconnected.
+        } catch (error: Exception) {
+            failure = error
         } finally {
             if (socket === sock) socket = null
             safeClose(sock)
+            if (!closed.get()) listener.onClosed(failure)
         }
     }
 
@@ -83,12 +86,8 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         when (header[OPCODE_OFFSET].toInt() and 0xff) {
             OP_VIDEO_FRAME -> {
                 val payload = if (body.size >= ScreenCodec.TAG_SIZE) {
-                    try {
-                        ScreenCodec.decryptFrame(key, frameCounter.get(), header, body)
-                            .also { frameCounter.incrementAndGet() }
-                    } catch (_: Exception) {
-                        return
-                    }
+                    ScreenCodec.decryptFrame(key, frameCounter.get(), header, body)
+                        .also { frameCounter.incrementAndGet() }
                 } else {
                     body
                 }

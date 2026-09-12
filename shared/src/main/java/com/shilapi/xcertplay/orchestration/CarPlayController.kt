@@ -134,6 +134,7 @@ class CarPlayController(
 
         override fun onServiceDisconnected(name: ComponentName) {
             vpnService = null
+            fail(IphoneUsbException.DeviceUnavailable("CarPlay VPN service disconnected"))
         }
     }
 
@@ -147,6 +148,9 @@ class CarPlayController(
             if (activeSession === session) activeSession = null
             listener.onSessionEnded(session)
         }
+
+        override fun onTransportError(message: String) =
+            listener.onTransportError(message)
 
         override fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) =
             listener.onDeviceInfo(session, info)

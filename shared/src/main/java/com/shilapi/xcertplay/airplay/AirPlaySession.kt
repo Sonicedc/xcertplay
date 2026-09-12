@@ -26,6 +26,7 @@ data class AirPlayDeviceInfo(
 interface AirPlaySessionListener {
     fun onSessionActive(session: AirPlaySession) {}
     fun onSessionEnded(session: AirPlaySession) {}
+    fun onTransportError(message: String) {}
     fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {}
     fun onHostUiRequested(session: AirPlaySession) {}
     fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {}
@@ -38,6 +39,7 @@ interface AirPlayMediaHandler {
     fun onDataStream(session: AirPlaySession, stream: Map<String, Any?>): Map<String, Any?>? = null
     fun onFeedback(session: AirPlaySession): Map<String, Any?>? = null
     fun onTeardown(session: AirPlaySession, type: Int) {}
+    fun onSessionClosed(session: AirPlaySession) {}
 }
 
 /**
@@ -95,6 +97,11 @@ class AirPlaySession(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         safeClose(socket)
+        try {
+            media.onSessionClosed(this)
+        } catch (error: Exception) {
+            Log.w(TAG, "airplay media stream teardown failed", error)
+        }
         teardown()
         if (notified.compareAndSet(false, true)) listener.onSessionEnded(this)
     }
@@ -118,6 +125,7 @@ class AirPlaySession(
             true
         } catch (error: Exception) {
             Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
+            close()
             false
         }
     }
@@ -464,6 +472,7 @@ class AirPlaySession(
             if (shared == null) {
                 Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
                 safeClose(socket)
+                close()
                 return
             }
             val writeKey = AirPlayCrypto.hkdfSha512(
@@ -481,7 +490,10 @@ class AirPlaySession(
             eventCipher = ControlCipher(readKey, writeKey)
             runEventRead(socket)
         } catch (error: Exception) {
-            if (!closed.get()) Log.e(TAG, "airplay event accept failed", error)
+            if (!closed.get()) {
+                Log.e(TAG, "airplay event accept failed", error)
+                close()
+            }
         }
     }
 
@@ -527,6 +539,7 @@ class AirPlaySession(
             if (eventSocket === socket) eventSocket = null
             eventCipher = null
             safeClose(socket)
+            if (!closed.get()) close()
         }
     }
 

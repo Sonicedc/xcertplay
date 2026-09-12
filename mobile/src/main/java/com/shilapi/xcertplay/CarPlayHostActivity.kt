@@ -1,7 +1,6 @@
 package com.shilapi.xcertplay
 
 import android.Manifest
-import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.ColorStateList
@@ -101,7 +100,6 @@ class CarPlayHostActivity : ComponentActivity() {
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
     private var statusView: TextView? = null
-    private var reconnectButtons: View? = null
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var sink: AndroidMediaSink? = null
@@ -273,41 +271,6 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         statusParams.setMargins(dp(12), 0, dp(12), dp(12))
 
-        val reconnect = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        val mfiButton = Button(this).apply {
-            text = "Reconnect MFi"
-            setOnClickListener {
-                restartCarPlay("Reconnect MFi requested")
-            }
-        }
-        val iphoneButton = Button(this).apply {
-            text = "Reconnect iPhone"
-            setOnClickListener {
-                restartCarPlay("Reconnect iPhone requested")
-            }
-        }
-        val rotateButton = Button(this).apply {
-            text = "Rotate"
-            setOnClickListener {
-                val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-                requestedOrientation = if (portrait) {
-                    ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                } else {
-                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                }
-            }
-        }
-        reconnect.addView(mfiButton)
-        reconnect.addView(iphoneButton)
-        reconnect.addView(rotateButton)
-        val reconnectParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.START,
-        )
-        reconnectParams.setMargins(dp(12), dp(12), 0, 0)
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
 
         root.addView(video)
@@ -319,7 +282,6 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
         )
         root.addView(log, statusParams)
-        root.addView(reconnect, reconnectParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -331,7 +293,6 @@ class CarPlayHostActivity : ComponentActivity() {
         gestureOverlay = gestureLayer
         settingsMenu = settings
         statusView = log
-        reconnectButtons = reconnect
         return root
     }
 
@@ -676,7 +637,6 @@ class CarPlayHostActivity : ComponentActivity() {
                         }
                         appendLog("AirPlay session active")
                         statusView?.visibility = View.GONE
-                        reconnectButtons?.visibility = View.GONE
                     }
                 }
 
@@ -685,16 +645,32 @@ class CarPlayHostActivity : ComponentActivity() {
                         if (menuOpen || controllerGeneration != restartGeneration) {
                             return@runOnUiThread
                         }
-                        appendLog("AirPlay session ended")
+                        appendLog("AirPlay session ended; reconnecting from scratch")
                         statusView?.visibility = View.VISIBLE
-                        reconnectButtons?.visibility = View.VISIBLE
+                        reconnectAfterLoss("AirPlay session ended")
+                    }
+                }
+
+                override fun onTransportError(message: String) {
+                    runOnUiThread {
+                        if (menuOpen || controllerGeneration != restartGeneration) {
+                            return@runOnUiThread
+                        }
+                        appendLog("CarPlay transport error: $message; reconnecting from scratch")
+                        statusView?.visibility = View.VISIBLE
+                        reconnectAfterLoss("CarPlay transport error: $message")
                     }
                 }
             },
             media = media,
             reportStatus = { status ->
                 if (!menuOpen && controllerGeneration == restartGeneration) {
-                    setStatus(status.describe())
+                    val description = status.describe()
+                    setStatus(description)
+                    when (status) {
+                        is CarPlayStatus.Failed -> reconnectAfterLoss(description)
+                        else -> Unit
+                    }
                 }
             },
             loadPairRecord = { AirPlayPersistence.loadLockdownRecord(this) },
@@ -749,6 +725,11 @@ class CarPlayHostActivity : ComponentActivity() {
         startCarPlay(size)
     }
 
+    private fun reconnectAfterLoss(reason: String) {
+        if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
+        restartCarPlay("Reconnecting after $reason")
+    }
+
     /** A resolution change requires a fresh /info advertisement, so rebuild the complete stack. */
     private fun restartCarPlay(reason: String) {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
@@ -782,7 +763,6 @@ class CarPlayHostActivity : ComponentActivity() {
         controller = null
         sink = null
         statusView?.visibility = View.GONE
-        reconnectButtons?.visibility = View.GONE
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
         logLines.clear()
@@ -817,7 +797,6 @@ class CarPlayHostActivity : ComponentActivity() {
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
         statusView?.visibility = View.VISIBLE
-        reconnectButtons?.visibility = View.VISIBLE
         logLines.clear()
         appendLog(
             "Settings closed; starting a fresh handshake at " +

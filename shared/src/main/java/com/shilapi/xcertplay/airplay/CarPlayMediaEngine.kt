@@ -49,6 +49,13 @@ class CarPlayMediaEngine(
                 override fun onCodec(codec: VideoCodec) = sink.onVideoCodec(type, codec)
                 override fun onConfig(codecData: ByteArray) = sink.onVideoConfig(type, codecData)
                 override fun onFrame(naluBytes: ByteArray) = sink.onVideoFrame(type, naluBytes)
+                override fun onClosed(cause: Throwable?) {
+                    Log.w(
+                        TAG,
+                        "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
+                    )
+                    session.close()
+                }
             },
         )
         streams[type] = screen
@@ -118,6 +125,13 @@ class CarPlayMediaEngine(
         val tunnel = IapTunnel(key)
         val port = tunnel.listen(object : IapTunnel.Listener {
             override fun onIap(bytes: ByteArray) = sink.onIapMessage(bytes)
+            override fun onClosed(cause: Throwable?) {
+                Log.w(
+                    TAG,
+                    "iAP tunnel ended reason=${cause?.message ?: "peer EOF"}",
+                )
+                session.close()
+            }
         })
         streams[STREAM_TYPE_DATA] = tunnel
         return linkedMapOf("type" to STREAM_TYPE_DATA, "streamID" to 1L, "dataPort" to port)
@@ -157,6 +171,13 @@ class CarPlayMediaEngine(
         audioMeta.remove(type)
         sink.onAudioStopped(type)
         streams.remove(type)?.close()
+    }
+
+    override fun onSessionClosed(session: AirPlaySession) {
+        streams.values.toList().forEach { it.close() }
+        streams.clear()
+        audioMeta.clear()
+        pendingMicrophone.clear()
     }
 
     private fun outputKey(session: AirPlaySession, stream: Map<String, Any?>): ByteArray? {

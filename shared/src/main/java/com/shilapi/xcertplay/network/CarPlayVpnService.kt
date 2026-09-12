@@ -87,7 +87,7 @@ class CarPlayVpnService : VpnService() {
             tun = tunFd
 
             val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
-                onTransportError(generation, error)
+                onTransportError(generation, listener, error)
             }
             ipv6Bridge.start()
             bridge = ipv6Bridge
@@ -96,7 +96,7 @@ class CarPlayVpnService : VpnService() {
             server.bind(InetSocketAddress(address, config.port))
             serverSocket = server
             Thread(
-                { acceptLoop(server, config, identity, pairings, mfi, listener, media) },
+                { acceptLoop(generation, server, config, identity, pairings, mfi, listener, media) },
                 "airplay-accept",
             ).apply {
                 isDaemon = true
@@ -121,6 +121,7 @@ class CarPlayVpnService : VpnService() {
     }
 
     private fun acceptLoop(
+        generation: Int,
         server: ServerSocket,
         config: AirPlayConfig,
         identity: AirPlayIdentity,
@@ -152,8 +153,8 @@ class CarPlayVpnService : VpnService() {
                 addSession(session)
                 session.start()
             }
-        } catch (_: IOException) {
-            // The server socket is closed during teardown.
+        } catch (error: IOException) {
+            if (active.get()) onTransportError(generation, listener, error)
         }
     }
 
@@ -166,14 +167,20 @@ class CarPlayVpnService : VpnService() {
         synchronized(sessionsLock) { sessions.remove(session) }
     }
 
-    private fun onTransportError(generation: Int, error: Throwable) {
-        Log.e(TAG, "NCM/VPN transport stopped: ${error.message}", error)
+    private fun onTransportError(
+        generation: Int,
+        listener: AirPlaySessionListener,
+        error: Throwable,
+    ) {
+        val message = error.message ?: error.javaClass.simpleName
+        Log.e(TAG, "CarPlay transport stopped: $message", error)
         Thread(
             {
                 synchronized(this) {
                     if (generation != attachGeneration) return@Thread
                     releaseLocked()
                 }
+                listener.onTransportError(message)
                 stopSelf()
             },
             "airplay-teardown",
