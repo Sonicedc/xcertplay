@@ -156,3 +156,11 @@ CarPlay 的媒体/输入数据通道在 USBMUX/iAP2 控制通道之外，由 iPh
 - MFi 认证层仅通过 I2C 基础读写不能证明 CarPlay 会话可用。
 - 从 GPL 项目移植代码可能带来许可约束。
 - 商业分发涉及 Apple MFi Program，不在本地源码范围内解决。
+
+## Implementation note (2026-09-12)
+
+The AirPlay session layer's MediaCodec/AudioTrack rendering seam is now filled by
+`AndroidMediaSink`, with `MediaCodecSupport` for avcC/hvcC, Annex B, RFC 3640 AAC/ADTS, and LPCM
+conversion, and `CarPlayTouchMapper` for SurfaceView touch forwarding. Opus decoding is skipped
+pending a native decoder. The full-screen host and the USB/NCM/iAP2 orchestration that feeds the
+sink are still unwired and remain hardware-unverified.

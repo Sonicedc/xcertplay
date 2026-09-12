@@ -186,3 +186,16 @@ keep-alive port. Decoded media is delivered to the `MediaSink` interface; Androi
 MediaCodec/AudioTrack rendering and SurfaceView touch input remain integration seams.
 
 This has not been verified against an iPhone or vehicle head unit.
+
+## Android media rendering status
+
+`AndroidMediaSink` implements the `MediaSink` rendering seam: a MediaCodec H.264/H.265 decoder on
+a caller-provided `Surface`, plus AAC-LC and LPCM playback through MediaCodec/AudioTrack.
+`MediaCodecSupport` handles avcC/hvcC CSD, Annex B framing, RFC 3640 AAC access-unit extraction
+and ADTS wrapping, and wired LPCM byte-swapping. Opus packets are skipped because Android
+MediaCodec has no built-in Opus decoder; it remains a native-decoder gap. `CarPlayTouchMapper`
+turns Android MotionEvents into CarPlay touch contacts for `AirPlaySession.sendTouch`.
+
+This is the rendering component only. The full-screen SurfaceView host and the USB/NCM/iAP2
+orchestration that feeds it are still unwired, and the path has not been verified against an
+iPhone or vehicle head unit.

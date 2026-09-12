@@ -520,3 +520,32 @@ $env:OS = "Windows_NT"
 `shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary JVM test exercising the
 LIVI audio RTP layout, screen frame header AAD, avcC/hvcC config detection, audio-format mapping,
 and NTP clock initialization passed and was then removed to preserve the curated test count.
+
+## Stage 8H: Android media rendering (code complete, hardware unverified)
+
+- `AndroidMediaSink` implements the `MediaSink` seam with a MediaCodec H.264/H.265 decoder bound
+  to a caller-supplied `Surface`, plus one MediaCodec/AudioTrack audio renderer per stream type.
+- `MediaCodecSupport` converts CarPlay's length-prefixed screen NALs to Annex B, passes raw SPS/PPS
+  (avcC) or the hvcC record as Android CSD, extracts RFC 3640 AAC access units and wraps them in
+  ADTS, and byte-swaps the wired big-endian LPCM samples for AudioTrack. Opus packets are skipped:
+  Android MediaCodec has no built-in Opus decoder, so a native decoder remains a gap.
+- `CarPlayTouchMapper` normalizes Android MotionEvents into up to two `AirPlayContact`s for
+  `AirPlaySession.sendTouch`.
+
+This fills the rendering seam only. It does not create the full-screen SurfaceView host or the
+USB/NCM/iAP2 orchestration that constructs `CarPlayMediaEngine`, and it has not been verified
+against an iPhone or vehicle head unit.
+
+### Build and unit tests
+
+2026-09-12 verified with Android Studio JBR 25 offline:
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+$env:OS = "Windows_NT"
+.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
+```
+
+`shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary JVM test for avcC/hvcC
+config splitting, Annex B conversion, ADTS framing, and OpusHead construction passed and was then
+removed to preserve the curated test count.
