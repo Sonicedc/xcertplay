@@ -6,6 +6,7 @@ import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.AirPlayMediaHandler
@@ -70,14 +71,14 @@ class CarPlayVpnService : VpnService() {
 
             val tunFd = Builder()
                 .addAddress(linkLocal, LINK_PREFIX)
-                .addRoute(LINK_LOCAL_ROUTE, 0)
+                .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
                 .setSession(SESSION_NAME)
                 .setMtu(TUN_MTU)
                 .establish()
                 ?: throw IOException("VpnService.establish returned null")
             tun = tunFd
 
-            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { onTransportError() }
+            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error -> onTransportError(error) }
             ipv6Bridge.start()
             bridge = ipv6Bridge
 
@@ -115,6 +116,7 @@ class CarPlayVpnService : VpnService() {
         try {
             while (active.get()) {
                 val socket: Socket = server.accept()
+                Log.i(TAG, "airplay connection accepted from ${socket.remoteSocketAddress}")
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
                 val session = AirPlaySession(
@@ -148,7 +150,8 @@ class CarPlayVpnService : VpnService() {
         synchronized(sessionsLock) { sessions.remove(session) }
     }
 
-    private fun onTransportError() {
+    private fun onTransportError(error: Throwable) {
+        Log.e(TAG, "NCM/VPN transport stopped: ${error.message}", error)
         Thread(
             {
                 release()
@@ -176,8 +179,9 @@ class CarPlayVpnService : VpnService() {
     }
 
     companion object {
+        private const val TAG = "xcertplay-usb"
         private const val LINK_PREFIX = 64
-        private const val LINK_LOCAL_ROUTE = "fe80::/64"
+        private const val LINK_LOCAL_ROUTE = "fe80::"
         private const val SESSION_NAME = "xcertplay CarPlay"
         private const val TUN_MTU = 1500
 

@@ -1,6 +1,8 @@
 package com.shilapi.xcertplay.transport
 
+import java.io.Closeable
 import java.security.GeneralSecurityException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Blocking minimum Lockdown path that opens the `com.apple.carkit.service` byte stream.
@@ -84,14 +86,38 @@ class LockdownCarKitClient(
                 serviceConnection
             }
             serviceStream = readyStream
-            secureLockdown.close()
+            val ownedStream = CarkitServiceStream(readyStream, secureLockdown)
             serviceStream = null
-            return readyStream
+            return ownedStream
         } finally {
+            if (serviceStream != null) {
+                try {
+                    serviceStream.close()
+                } finally {
+                    secureLockdown.close()
+                }
+            }
+        }
+    }
+
+    /** Keeps the Lockdown session that created carkit alive for the service stream's lifetime. */
+    private class CarkitServiceStream(
+        private val service: BlockingDuplexByteStream,
+        private val lockdown: Closeable,
+    ) : BlockingDuplexByteStream {
+        private val closed = AtomicBoolean(false)
+
+        override fun send(data: ByteArray) = service.send(data)
+
+        override fun recv(maxBytes: Int, timeoutMillis: Long): ByteArray? =
+            service.recv(maxBytes, timeoutMillis)
+
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
             try {
-                secureLockdown.close()
+                service.close()
             } finally {
-                serviceStream?.close()
+                lockdown.close()
             }
         }
     }

@@ -51,14 +51,11 @@ class LockdownPairRecord private constructor(
     /** Builds only the nested Pair request value; EscrowBag is intentionally unavailable yet. */
     fun toPairRequestDictionary(): LockdownPlistValue.Dictionary = LockdownPlistValue.Dictionary(
         linkedMapOf(
-            "DevicePublicKey" to LockdownPlistValue.Data(devicePublicKeyPem),
             "DeviceCertificate" to LockdownPlistValue.Data(deviceCertificatePem),
             "HostCertificate" to LockdownPlistValue.Data(hostCertificatePem),
             "HostID" to LockdownPlistValue.Text(hostId),
-            "RootPrivateKey" to LockdownPlistValue.Data(rootPrivateKeyPem),
             "RootCertificate" to LockdownPlistValue.Data(rootCertificatePem),
             "SystemBUID" to LockdownPlistValue.Text(systemBuid),
-            "WiFiMACAddress" to LockdownPlistValue.Text(wifiMacAddress),
         ),
     )
 
@@ -113,9 +110,9 @@ class LockdownPairRecord private constructor(
             wifiMacAddress = wifiMacAddress,
             devicePublicKeyPem = devicePublicKeyPem,
             deviceCertificatePem = material.deviceCertificatePem,
-            hostPrivateKeyPem = material.privateKeyPem,
-            hostCertificatePem = material.rootCertificatePem,
-            rootPrivateKeyPem = material.privateKeyPem,
+            hostPrivateKeyPem = material.hostPrivateKeyPem,
+            hostCertificatePem = material.hostCertificatePem,
+            rootPrivateKeyPem = material.rootPrivateKeyPem,
             rootCertificatePem = material.rootCertificatePem,
         )
     }
@@ -149,23 +146,28 @@ object LockdownPairRecordGenerator {
 
 internal class CertificateMaterial(
     deviceCertificatePem: ByteArray,
-    privateKeyPem: ByteArray,
+    hostPrivateKeyPem: ByteArray,
+    hostCertificatePem: ByteArray,
+    rootPrivateKeyPem: ByteArray,
     rootCertificatePem: ByteArray,
 ) {
     private val storedDeviceCertificatePem = deviceCertificatePem.copyOf()
-    private val storedPrivateKeyPem = privateKeyPem.copyOf()
+    private val storedHostPrivateKeyPem = hostPrivateKeyPem.copyOf()
+    private val storedHostCertificatePem = hostCertificatePem.copyOf()
+    private val storedRootPrivateKeyPem = rootPrivateKeyPem.copyOf()
     private val storedRootCertificatePem = rootCertificatePem.copyOf()
 
     val deviceCertificatePem: ByteArray get() = storedDeviceCertificatePem.copyOf()
-    val privateKeyPem: ByteArray get() = storedPrivateKeyPem.copyOf()
+    val hostPrivateKeyPem: ByteArray get() = storedHostPrivateKeyPem.copyOf()
+    val hostCertificatePem: ByteArray get() = storedHostCertificatePem.copyOf()
+    val rootPrivateKeyPem: ByteArray get() = storedRootPrivateKeyPem.copyOf()
     val rootCertificatePem: ByteArray get() = storedRootCertificatePem.copyOf()
 }
 
 /** Minimal Android/JCA implementation of the certificate profile used by the locked dependency. */
 private object CertificateMaterialGenerator {
     private const val RSA_KEY_BITS = 2048
-    // Exact locked idevice 0.1.65 duration, expressed there as Duration::from_secs(...).
-    private const val CERTIFICATE_LIFETIME_SECONDS = 365L * 9 * 12 * 31 * 24 * 60 * 60
+    private const val CERTIFICATE_LIFETIME_SECONDS = 10L * 365 * 24 * 60 * 60
     private const val MILLIS_PER_SECOND = 1_000L
     private const val UTC_TIME_LAST_YEAR = 2049
     private val sha256WithRsa = algorithmIdentifier("1.2.840.113549.1.1.11")
@@ -173,34 +175,47 @@ private object CertificateMaterialGenerator {
 
     fun generate(devicePublicKeyPem: ByteArray): CertificateMaterial {
         val devicePublicKey = parsePkcs1RsaPublicKey(devicePublicKeyPem)
+        val rootKeyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(RSA_KEY_BITS) }.generateKeyPair()
         val hostKeyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(RSA_KEY_BITS) }.generateKeyPair()
+        val rootPublicKey = rootKeyPair.public as? RSAPublicKey
+            ?: throw GeneralSecurityException("Generated root key is not RSA")
         val hostPublicKey = hostKeyPair.public as? RSAPublicKey
-            ?: throw GeneralSecurityException("Generated key is not RSA")
+            ?: throw GeneralSecurityException("Generated host key is not RSA")
         val now = System.currentTimeMillis()
-        val rootName = distinguishedName(null)
-        val deviceName = distinguishedName("Device")
+        val emptyName = distinguishedName(null)
         val rootDer = certificate(
-            issuer = rootName,
-            subject = rootName,
-            certificatePublicKey = hostPublicKey,
-            signingKey = hostKeyPair.private,
-            signingPublicKey = hostPublicKey,
+            issuer = emptyName,
+            subject = emptyName,
+            certificatePublicKey = rootPublicKey,
+            signingKey = rootKeyPair.private,
+            signingPublicKey = rootPublicKey,
             nowMillis = now,
+            extensions = rootExtensions(),
+        )
+        val hostDer = certificate(
+            issuer = emptyName,
+            subject = emptyName,
+            certificatePublicKey = hostPublicKey,
+            signingKey = rootKeyPair.private,
+            signingPublicKey = rootPublicKey,
+            nowMillis = now,
+            extensions = leafExtensions(hostPublicKey, includeSubjectKeyIdentifier = false),
         )
         val deviceDer = certificate(
-            issuer = deviceName,
-            subject = deviceName,
+            issuer = emptyName,
+            subject = emptyName,
             certificatePublicKey = devicePublicKey,
-            signingKey = hostKeyPair.private,
-            signingPublicKey = hostPublicKey,
+            signingKey = rootKeyPair.private,
+            signingPublicKey = rootPublicKey,
             nowMillis = now,
+            extensions = leafExtensions(devicePublicKey, includeSubjectKeyIdentifier = true),
         )
-        val privateKeyPem = pem("PRIVATE KEY", hostKeyPair.private.encoded)
-        val rootPem = pem("CERTIFICATE", rootDer)
         return CertificateMaterial(
             deviceCertificatePem = pem("CERTIFICATE", deviceDer),
-            privateKeyPem = privateKeyPem,
-            rootCertificatePem = rootPem,
+            hostPrivateKeyPem = pem("PRIVATE KEY", hostKeyPair.private.encoded),
+            hostCertificatePem = pem("CERTIFICATE", hostDer),
+            rootPrivateKeyPem = pem("PRIVATE KEY", rootKeyPair.private.encoded),
+            rootCertificatePem = pem("CERTIFICATE", rootDer),
         )
     }
 
@@ -211,13 +226,14 @@ private object CertificateMaterialGenerator {
         signingKey: PrivateKey,
         signingPublicKey: PublicKey,
         nowMillis: Long,
+        extensions: ByteArray,
     ): ByteArray {
         val publicKeyBits = pkcs1PublicKey(certificatePublicKey)
         val notAfterMillis = nowMillis + CERTIFICATE_LIFETIME_SECONDS * MILLIS_PER_SECOND
         require(nowMillis in 0 until notAfterMillis) { "Invalid certificate validity" }
         val tbs = sequence(
             explicit(0, integer(BigInteger.valueOf(2))),
-            integer(BigInteger.ONE),
+            integer(BigInteger.ZERO),
             sha256WithRsa,
             issuer,
             sequence(
@@ -226,7 +242,7 @@ private object CertificateMaterialGenerator {
             ),
             subject,
             sequence(rsaEncryption, bitString(publicKeyBits)),
-            explicit(3, rootProfileExtensions(publicKeyBits)),
+            explicit(3, extensions),
         )
         val signer = Signature.getInstance("SHA256withRSA").apply {
             initSign(signingKey)
@@ -247,11 +263,31 @@ private object CertificateMaterialGenerator {
         if (!verifier.verify(signature)) throw GeneralSecurityException("Generated certificate signature does not verify")
     }
 
-    private fun rootProfileExtensions(publicKeyBits: ByteArray): ByteArray = sequence(
-        extension("2.5.29.14", critical = false, value = octetString(MessageDigest.getInstance("SHA-1").digest(publicKeyBits))),
+    private fun rootExtensions(): ByteArray = sequence(
         extension("2.5.29.19", critical = true, value = sequence(boolean(true))),
-        extension("2.5.29.15", critical = true, value = bitString(byteArrayOf(0x06), unusedBits = 1)),
     )
+
+    private fun leafExtensions(
+        publicKey: RSAPublicKey,
+        includeSubjectKeyIdentifier: Boolean,
+    ): ByteArray {
+        val extensions = mutableListOf(
+            extension("2.5.29.19", critical = true, value = sequence()),
+        )
+        if (includeSubjectKeyIdentifier) {
+            extensions += extension(
+                "2.5.29.14",
+                critical = false,
+                value = octetString(MessageDigest.getInstance("SHA-1").digest(pkcs1PublicKey(publicKey))),
+            )
+        }
+        extensions += extension(
+            "2.5.29.15",
+            critical = true,
+            value = bitString(byteArrayOf(0xa0.toByte()), unusedBits = 5),
+        )
+        return sequence(*extensions.toTypedArray())
+    }
 
     private fun extension(oid: String, critical: Boolean, value: ByteArray): ByteArray =
         if (critical) sequence(objectIdentifier(oid), boolean(true), octetString(value))

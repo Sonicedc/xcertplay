@@ -1,0 +1,28 @@
+package com.shilapi.xcertplay.transport
+
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class Iap2WiredControlClientTest {
+    @Test
+    fun carPlayStartSessionNestsAddressesInsideWiredAttributes() {
+        val frame = Iap2WiredControlClient.carPlayStartSession(
+            Iap2WiredCarPlayEndpoint(
+                ipv6Addresses = listOf("fe80::2"),
+                airPlayPort = 7000,
+                deviceIdentifier = "02:00:00:00:00:02",
+                publicKey = "abcd",
+                sourceVersion = "1.0",
+            ),
+        )
+
+        assertEquals(0x4301, frame.messageId)
+        val outer = Iap2CsmParameters.parse(frame.payload)
+        val wired = outer.single { it.id == 0 }
+        val addresses = Iap2CsmParameters.parse(wired.payload)
+        assertEquals(1, addresses.size)
+        assertEquals(0, addresses.single().id)
+        assertArrayEquals("fe80::2\u0000".encodeToByteArray(), addresses.single().payload)
+    }
+}

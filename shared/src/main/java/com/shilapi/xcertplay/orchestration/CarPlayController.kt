@@ -42,7 +42,7 @@ import com.shilapi.xcertplay.transport.LockdownPairRecord
 import com.shilapi.xcertplay.transport.NcmFunctionDiscovery
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.io.Closeable
-import java.security.SecureRandom
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
@@ -101,11 +101,12 @@ class CarPlayController(
     )
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val hostId = UUID.randomUUID().toString()
-    private val systemBuid = randomHex(20)
+    private val hostId = UUID.randomUUID().toString().uppercase(Locale.US)
+    private val systemBuid = UUID.randomUUID().toString().uppercase(Locale.US)
     private val lifecycleLock = Any()
     private val permissionGrant = AtomicBoolean(false)
     private var permissionPollGeneration = 0
+    private var reenumerationAttempts = 0
 
     @Volatile private var closed = false
     @Volatile private var phase = Phase.IDLE
@@ -272,8 +273,21 @@ class CarPlayController(
                 is Ch341UsbHost.OpenResult.Connected -> {
                     val session: Ch341UsbSession = result.session
                     try {
-                        val transport = Ch341I2cTransport(session)
-                        mfiSession = MfiSession(MfiRuntime.scan(transport), session)
+                    val transport = Ch341I2cTransport(session)
+                    config.ch341MfiResetGpio?.let { gpio ->
+                        transport.pulseActiveLowReset(gpio)
+                        Log.i(
+                            IphoneCarPlayConfiguration.TAG,
+                            "mfi reset pulse gpio=D$gpio mode=low/high-z",
+                        )
+                    }
+                    val client = MfiRuntime.scan(transport)
+                    Log.i(
+                        IphoneCarPlayConfiguration.TAG,
+                        "mfi coprocessor address=0x${client.address7Bit.toString(16)} " +
+                            "protocolMajor=${client.protocolMajor()}",
+                    )
+                    mfiSession = MfiSession(client, session)
                         onStatus(CarPlayStatus.MfiReady)
                         startIphone()
                     } catch (error: Throwable) {
@@ -288,6 +302,7 @@ class CarPlayController(
 
     private fun startIphone() {
         phase = Phase.IPHONE
+        reenumerationAttempts = 0
         onStatus(CarPlayStatus.DiscoveringIphone)
         val device = iphoneHost.discover().firstOrNull()
         if (device == null) {
@@ -330,8 +345,22 @@ class CarPlayController(
                 // The system broadcast and the polling fallback can both observe the grant.
                 if (!permissionGrant.compareAndSet(false, true)) return
                 permissionPollGeneration++
-                if (phase == Phase.REENUMERATION) openDataPaths(result.device)
-                else beginReenumeration(result.device)
+                when (phase) {
+                    Phase.REENUMERATION, Phase.IPHONE -> {
+                        if (IphoneCarPlayConfiguration.find(result.device) != null) {
+                            openDataPaths(result.device)
+                        } else if (reenumerationAttempts < MAXIMUM_REENUMERATION_ATTEMPTS) {
+                            beginReenumeration(result.device)
+                        } else {
+                            fail(
+                                IphoneUsbException.Protocol(
+                                    "iPhone did not expose a complete CarPlay USB configuration",
+                                ),
+                            )
+                        }
+                    }
+                    else -> Unit
+                }
             }
             is IphoneUsbHost.PermissionResult.Denied -> {
                 permissionGrant.set(true)
@@ -369,6 +398,7 @@ class CarPlayController(
 
     private fun beginReenumeration(device: UsbDevice) {
         phase = Phase.REENUMERATION
+        reenumerationAttempts += 1
         onStatus(CarPlayStatus.SelectingConfiguration)
         iphoneHost.requestCarPlayReenumerationAsync(device, executor) { transition ->
             when (transition) {
@@ -417,6 +447,7 @@ class CarPlayController(
             IphoneCarPlayConfiguration.TAG,
             "ncm config=${configuration.id} control=${function.control.id}/${function.control.alternateSetting}" +
                 " data=${function.data.id}/${function.data.alternateSetting}" +
+                " status=${function.statusIn?.address?.let { "0x${it.toString(16)}" } ?: "none"}" +
                 " in=0x${function.bulkIn.address.toString(16)} out=0x${function.bulkOut.address.toString(16)}",
         )
         val connection = usbManager.openDevice(device)
@@ -433,7 +464,6 @@ class CarPlayController(
             val pairRecord = loadPairRecord() ?: LockdownPairingClient(mux)
                 .pair(
                     label = config.label,
-                    hostName = config.hostName,
                     hostId = hostId,
                     systemBuid = systemBuid,
                     totalTimeoutMillis = PAIR_TIMEOUT_MILLIS,
@@ -445,7 +475,12 @@ class CarPlayController(
             val csm = Iap2CsmChannel.open(carkit)
             this.csm = csm
 
-            if (!attachVpn(ncm)) {
+            val ncmHostMac = ncm.hostMac ?: config.hostMac
+            Log.i(
+                IphoneCarPlayConfiguration.TAG,
+                "ncm using hostMac=${ncmHostMac.macString()}",
+            )
+            if (!attachVpn(ncm, ncmHostMac)) {
                 throw IphoneUsbException.DeviceUnavailable("Could not attach the NCM/VPN AirPlay transport")
             }
 
@@ -456,7 +491,7 @@ class CarPlayController(
                 airPlayPort = airPlayConfig.port,
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
-                deviceIdentifier = airPlayConfig.deviceId.ifBlank { null },
+                deviceIdentifier = ncmHostMac.macString(),
             )
             onStatus(CarPlayStatus.RunningControl)
             val result = Iap2WiredControlClient(csm, Iap2MfiAuthenticationClient(mfi)).run(
@@ -465,6 +500,7 @@ class CarPlayController(
                 availableCurrentMilliAmps = config.availableCurrentMilliAmps,
                 timeoutMillis = CONTROL_LOOP_TIMEOUT_MILLIS,
                 onIncoming = { },
+                onProgress = { message -> Log.i(IphoneCarPlayConfiguration.TAG, message) },
             )
             onStatus(
                 when (result.terminal) {
@@ -478,7 +514,7 @@ class CarPlayController(
         }
     }
 
-    private fun attachVpn(ncm: NcmUsbBridge): Boolean {
+    private fun attachVpn(ncm: NcmUsbBridge, hostMac: ByteArray): Boolean {
         onStatus(CarPlayStatus.AttachingNetwork)
         val service = awaitVpnService() ?: run {
             ncm.close()
@@ -488,7 +524,7 @@ class CarPlayController(
             service.attach(
                 ncm = ncm,
                 linkLocal = config.linkLocal,
-                hostMac = config.hostMac,
+                hostMac = hostMac,
                 config = airPlayConfig,
                 identity = identity,
                 pairings = pairings,
@@ -514,6 +550,9 @@ class CarPlayController(
             }
         }
     }
+
+    private fun ByteArray.macString(): String =
+        joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private fun awaitVpnService(): CarPlayVpnService? {
         vpnService?.let { return it }
@@ -601,11 +640,7 @@ class CarPlayController(
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
         private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
+        private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
 
-        private fun randomHex(bytes: Int): String {
-            val data = ByteArray(bytes)
-            SecureRandom().nextBytes(data)
-            return data.joinToString("") { "%02X".format(it.toInt() and 0xff) }
-        }
     }
 }

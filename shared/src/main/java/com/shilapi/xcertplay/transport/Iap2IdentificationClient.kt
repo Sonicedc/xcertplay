@@ -170,7 +170,7 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                 listOf(
                     Iap2CsmParameter(0, byteArrayOf(1)),
                     Iap2CsmParameter(1, nulTerminated(config.externalAccessoryProtocol)),
-                    Iap2CsmParameter(2, byteArrayOf(4)),
+                    Iap2CsmParameter(2, byteArrayOf(0)),
                 ),
             )
             val usbHostTransport = Iap2CsmParameters.encode(
@@ -180,7 +180,6 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                     Iap2CsmParameter(2, EMPTY),
                     Iap2CsmParameter(3, byteArrayOf(config.carPlayUsbInterfaceNumber.toByte())),
                     Iap2CsmParameter(4, EMPTY),
-                    Iap2CsmParameter(5, EMPTY),
                 ),
             )
             val payload = Iap2CsmParameters.encode(
@@ -227,15 +226,22 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
         private val EMPTY = ByteArray(0)
         /* Keep this list paired with Iap2WiredControlClient; no stop or AA messages are claimed. */
         private val MESSAGES_SENT_BY_ACCESSORY = intArrayOf(
-            0xae03, // PowerSourceUpdate
             0x5000, // StartNowPlayingUpdates
+            0x5002, // StopNowPlayingUpdates
             0x5200, // StartRouteGuidanceUpdates
+            0x5203, // StopRouteGuidanceUpdates
             0xae00, // StartPowerUpdates
+            0xae02, // StopPowerUpdates
             0x4157, // StartCommunicationsUpdates
+            0x4159, // StopCommunicationsUpdates
             0x4154, // StartCallStateUpdates
+            0x4156, // StopCallStateUpdates
+            0xae03, // PowerSourceUpdate
             0x4301, // CarPlayStartSession
         )
         private val MESSAGES_RECEIVED_FROM_PHONE = intArrayOf(
+            0xea00, // StartExternalAccessoryProtocolSession
+            0xea01, // StopExternalAccessoryProtocolSession
             0x5001, // NowPlayingUpdate
             0x5201, // RouteGuidanceUpdate
             0x5202, // RouteGuidanceManeuverUpdate

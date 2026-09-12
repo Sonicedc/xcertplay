@@ -12,6 +12,7 @@ import java.net.InetAddress
 class CarPlayRuntimeConfig(
     val iphoneDevices: List<UsbDeviceId> = emptyList(),
     val ch341Devices: List<UsbDeviceId> = emptyList(),
+    val ch341MfiResetGpio: Int? = null,
     val linuxI2cPath: String? = null,
     val hostMac: ByteArray = DEFAULT_HOST_MAC,
     val linkLocal: String = "fe80::2",
@@ -33,6 +34,9 @@ class CarPlayRuntimeConfig(
         require(hostName.isNotBlank()) { "hostName must not be blank" }
         require(ch341Devices.isNotEmpty() || linuxI2cPath != null) {
             "Either ch341Devices or linuxI2cPath must be configured for MFi I2C"
+        }
+        require(ch341MfiResetGpio == null || ch341MfiResetGpio in 0..5) {
+            "CH341 MFi reset GPIO must be D0..D5"
         }
     }
 

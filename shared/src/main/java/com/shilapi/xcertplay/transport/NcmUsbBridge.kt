@@ -3,12 +3,11 @@ package com.shilapi.xcertplay.transport
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
-import android.hardware.usb.UsbRequest
+import android.hardware.usb.UsbConstants
 import android.util.Log
 import java.io.Closeable
-import java.nio.ByteBuffer
 import java.util.ArrayDeque
-import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * A blocking NCM data pipe that moves Ethernet frames as NTB16 blocks over bulk endpoints.
@@ -21,18 +20,29 @@ class NcmUsbBridge internal constructor(
     private val connection: UsbDeviceConnection,
     private val outEndpoint: UsbEndpoint,
     private val inEndpoint: UsbEndpoint,
+    private val statusEndpoint: UsbEndpoint?,
     private val claimedInterfaces: List<UsbInterface>,
+    descriptorHostMac: ByteArray?,
 ) : Closeable {
+    private val descriptorMac = descriptorHostMac?.copyOf()
+    val hostMac: ByteArray? get() = descriptorMac?.copyOf()
     private val stateLock = Any()
     private val readLock = Any()
     private val writeLock = Any()
     private var closed = false
     private var failure: IphoneUsbException? = null
-    private var pendingRead: UsbRequest? = null
     private var sequence = 0
+    private var loggedWriteTimeout = false
     private val frames = ArrayDeque<ByteArray>()
     private var queuedBytes = 0
     private var buffered = ByteArray(0)
+    private val statusRunning = AtomicBoolean(statusEndpoint != null)
+    private val statusThread = statusEndpoint?.let { endpoint ->
+        Thread({ drainStatus(endpoint) }, "ncm-status-in").apply {
+            isDaemon = true
+            start()
+        }
+    }
 
     /** Wraps one Ethernet frame in one NTB16 block and writes it to bulk OUT. */
     fun send(frame: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
@@ -44,10 +54,23 @@ class NcmUsbBridge internal constructor(
         }
         val block = Ntb16Codec.build(frame, sequence)
         val transferred = connection.bulkTransfer(outEndpoint, block, block.size, timeoutMillis)
+        // Before StartCarPlaySession the phone keeps the NCM data path NAKed. Android reports the
+        // resulting timeout as -1; it is not a detach and later packets must be allowed to retry.
+        if (transferred <= 0) {
+            if (!loggedWriteTimeout) {
+                loggedWriteTimeout = true
+                Log.i(IphoneCarPlayConfiguration.TAG, "ncm bulk-out not ready; retaining bridge for retry")
+            }
+            return@synchronized
+        }
         if (transferred != block.size) {
             throw IphoneUsbException.DeviceUnavailable(
                 "NCM write transferred $transferred of ${block.size} bytes",
             )
+        }
+        if (loggedWriteTimeout) {
+            loggedWriteTimeout = false
+            Log.i(IphoneCarPlayConfiguration.TAG, "ncm bulk-out became ready")
         }
     }
 
@@ -75,12 +98,18 @@ class NcmUsbBridge internal constructor(
     }
 
     override fun close() {
-        val requestToCancel = synchronized(stateLock) {
+        statusRunning.set(false)
+        synchronized(stateLock) {
             if (closed) return
             closed = true
-            pendingRead
         }
-        requestToCancel?.cancel()
+        statusThread?.let { thread ->
+            try {
+                thread.join(STATUS_READ_TIMEOUT_MILLIS + 250L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
         for (usbInterface in claimedInterfaces.asReversed()) {
             try {
                 connection.releaseInterface(usbInterface)
@@ -90,6 +119,29 @@ class NcmUsbBridge internal constructor(
         }
         connection.close()
     }
+
+    private fun drainStatus(endpoint: UsbEndpoint) {
+        val buffer = ByteArray(endpoint.maxPacketSize.coerceAtLeast(64))
+        var loggedFirst = false
+        while (statusRunning.get()) {
+            val transferred = try {
+                connection.bulkTransfer(endpoint, buffer, buffer.size, STATUS_READ_TIMEOUT_MILLIS)
+            } catch (_: RuntimeException) {
+                return
+            }
+            if (transferred <= 0) continue
+            if (!loggedFirst) {
+                loggedFirst = true
+                Log.i(
+                    IphoneCarPlayConfiguration.TAG,
+                    "ncm status notification bytes=$transferred data=${buffer.copyOf(transferred).hex(32)}",
+                )
+            }
+        }
+    }
+
+    private fun ByteArray.hex(limit: Int): String =
+        take(limit).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private fun drainFrames() {
         while (true) {
@@ -127,54 +179,17 @@ class NcmUsbBridge internal constructor(
     }
 
     private fun readChunk(timeoutMillis: Long): ByteArray? {
-        val request = UsbRequest()
-        var initialized = false
-        try {
-            if (!request.initialize(connection, inEndpoint)) {
-                throw IphoneUsbException.DeviceUnavailable("Android could not initialize NCM read request")
-            }
-            initialized = true
-            synchronized(stateLock) {
-                checkOpenLocked()
-                pendingRead = request
-            }
-            val buffer = ByteBuffer.allocateDirect(READ_CHUNK_BYTES)
-            if (!request.queue(buffer)) {
-                throw IphoneUsbException.DeviceUnavailable("Android could not queue NCM read request")
-            }
-            val completed = try {
-                connection.requestWait(timeoutMillis)
-            } catch (_: TimeoutException) {
-                drainCancelledRead(request)
-                return null
-            }
-            if (completed == null) throw failSession("Android returned no NCM read request")
-            if (completed !== request) throw failSession("Android completed an unexpected USB request")
-            return ByteArray(buffer.position()).also {
-                buffer.flip()
-                buffer.get(it)
-            }
-        } catch (error: IphoneUsbException) {
-            throw error
+        checkOpen()
+        val buffer = ByteArray(READ_CHUNK_BYTES)
+        val transferred = try {
+            connection.bulkTransfer(inEndpoint, buffer, buffer.size, timeoutMillis.toInt())
         } catch (error: RuntimeException) {
             throw failSession("NCM read failed", error)
-        } finally {
-            synchronized(stateLock) {
-                if (pendingRead === request) pendingRead = null
-            }
-            if (initialized) request.cancel()
-            request.close()
         }
-    }
-
-    private fun drainCancelledRead(request: UsbRequest) {
-        if (!request.cancel()) throw failSession("Android could not cancel timed out NCM read request")
-        val completed = try {
-            connection.requestWait(CANCEL_DRAIN_TIMEOUT_MILLIS)
-        } catch (_: TimeoutException) {
-            throw failSession("Timed out draining cancelled NCM read request")
-        }
-        if (completed !== request) throw failSession("Android did not drain the cancelled NCM read request")
+        // Android reports both an ordinary bulk-IN timeout and a NAK as a negative result. Keep
+        // polling: USBMUX owns authoritative detach/failure detection for the same phone.
+        if (transferred <= 0) return null
+        return buffer.copyOf(transferred)
     }
 
     private fun failSession(message: String, cause: Throwable? = null): IphoneUsbException.DeviceUnavailable {
@@ -206,15 +221,20 @@ class NcmUsbBridge internal constructor(
     companion object {
         private const val READ_CHUNK_BYTES = 32 * 1024
         private const val USB_PACKET_SIZE = 512
+        private const val STATUS_READ_TIMEOUT_MILLIS = 1_000
         private const val MAX_QUEUED_FRAMES = 256
         private const val MAX_QUEUED_BYTES = 1 shl 20
-        private const val CANCEL_DRAIN_TIMEOUT_MILLIS = 1_000L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         /** Claims and activates the NCM control/data interfaces; owns the connection on success. */
         fun open(connection: UsbDeviceConnection, function: NcmFunctionDiscovery.NcmFunction): NcmUsbBridge {
             val claimed = ArrayList<UsbInterface>(2)
             try {
+                val descriptorHostMac = readNcmHostMac(connection, function.control.id)
+                Log.i(
+                    IphoneCarPlayConfiguration.TAG,
+                    "ncm descriptor hostMac=${descriptorHostMac?.macString() ?: "unavailable"}",
+                )
                 // Apple's Ethernet function exposes control and data as alternate settings of the
                 // same interface id, so it must be claimed once and switched with setInterface.
                 val sameInterface = function.control.id == function.data.id
@@ -255,7 +275,18 @@ class NcmUsbBridge internal constructor(
                         "Android could not select the NCM data alternate setting",
                     )
                 }
-                return NcmUsbBridge(connection, function.bulkOut, function.bulkIn, claimed)
+                Log.i(
+                    IphoneCarPlayConfiguration.TAG,
+                    "ncm status endpoint=${function.statusIn?.address?.let { "0x${it.toString(16)}" } ?: "none"}",
+                )
+                return NcmUsbBridge(
+                    connection,
+                    function.bulkOut,
+                    function.bulkIn,
+                    function.statusIn,
+                    claimed,
+                    descriptorHostMac,
+                )
             } catch (error: Throwable) {
                 for (usbInterface in claimed.asReversed()) {
                     try {
@@ -269,5 +300,59 @@ class NcmUsbBridge internal constructor(
                 throw IphoneUsbException.DeviceUnavailable("Android NCM open failed", error)
             }
         }
+
+        private fun readNcmHostMac(connection: UsbDeviceConnection, controlInterfaceId: Int): ByteArray? {
+            val index = ethernetMacStringIndex(connection.rawDescriptors, controlInterfaceId) ?: return null
+            val buffer = ByteArray(256)
+            val length = connection.controlTransfer(
+                UsbConstants.USB_DIR_IN or UsbConstants.USB_TYPE_STANDARD,
+                USB_REQUEST_GET_DESCRIPTOR,
+                (USB_STRING_DESCRIPTOR_TYPE shl 8) or index,
+                USB_ENGLISH_US,
+                buffer,
+                buffer.size,
+                USB_CONTROL_TIMEOUT_MILLIS,
+            )
+            if (length < 4 || (buffer[1].toInt() and 0xff) != USB_STRING_DESCRIPTOR_TYPE) return null
+            val descriptorLength = (buffer[0].toInt() and 0xff).coerceAtMost(length)
+            if (descriptorLength < 4) return null
+            val value = buffer.copyOfRange(2, descriptorLength).toString(Charsets.UTF_16LE)
+            val hex = value.filter { it.digitToIntOrNull(16) != null }
+            if (hex.length != 12) return null
+            return ByteArray(6) { offset -> hex.substring(offset * 2, offset * 2 + 2).toInt(16).toByte() }
+        }
+
+        private fun ethernetMacStringIndex(raw: ByteArray, controlInterfaceId: Int): Int? {
+            var offset = 0
+            var currentInterface = -1
+            while (offset + 2 <= raw.size) {
+                val length = raw[offset].toInt() and 0xff
+                val type = raw[offset + 1].toInt() and 0xff
+                if (length < 2 || offset + length > raw.size) return null
+                if (type == USB_INTERFACE_DESCRIPTOR_TYPE && length >= 9) {
+                    currentInterface = raw[offset + 2].toInt() and 0xff
+                } else if (
+                    type == CDC_FUNCTIONAL_DESCRIPTOR_TYPE &&
+                    length >= 4 &&
+                    currentInterface == controlInterfaceId &&
+                    (raw[offset + 2].toInt() and 0xff) == CDC_ETHERNET_SUBTYPE
+                ) {
+                    return (raw[offset + 3].toInt() and 0xff).takeIf { it != 0 }
+                }
+                offset += length
+            }
+            return null
+        }
+
+        private fun ByteArray.macString(): String =
+            joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+        private const val USB_INTERFACE_DESCRIPTOR_TYPE = 0x04
+        private const val USB_REQUEST_GET_DESCRIPTOR = 0x06
+        private const val USB_STRING_DESCRIPTOR_TYPE = 0x03
+        private const val CDC_FUNCTIONAL_DESCRIPTOR_TYPE = 0x24
+        private const val CDC_ETHERNET_SUBTYPE = 0x0f
+        private const val USB_ENGLISH_US = 0x0409
+        private const val USB_CONTROL_TIMEOUT_MILLIS = 1_000
     }
 }

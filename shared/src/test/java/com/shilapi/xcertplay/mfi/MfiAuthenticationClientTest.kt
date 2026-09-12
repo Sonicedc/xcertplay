@@ -8,6 +8,22 @@ import org.junit.Test
 
 class MfiAuthenticationClientTest {
     @Test
+    fun readsCertificateInIncrementing128ByteWindows() {
+        val certificate = bytes(300) { it }
+        val transport = ScriptedTransport(
+            select(0x30), pureRead(2, bytes(1, 44)),
+            select(0x31), pureRead(128, certificate.copyOfRange(0, 128)),
+            select(0x32), pureRead(128, certificate.copyOfRange(128, 256)),
+            select(0x33), pureRead(44, certificate.copyOfRange(256, 300)),
+        )
+
+        val result = MfiAuthenticationClient(transport, 0x11).readCertificate()
+
+        assertArrayEquals(certificate, result)
+        assertEquals(0, transport.unconsumedSteps)
+    }
+
+    @Test
     fun signsChallengeWithSeparatedRegisterSelectAndRead() {
         val challenge = bytes(20) { it + 1 }
         val signature = bytes(128) { 0xa0 + it }

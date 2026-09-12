@@ -59,8 +59,16 @@ class MfiDeviceScanner(
             DeviceVersionRead.Failure(MfiDiscoveryError.UnexpectedResponseLength(0, selectResponse.size))
         } else {
             val value = transport.transaction(address7Bit, ByteArray(0), 1)
-            if (value.size == 1) DeviceVersionRead.Success(value[0].toInt() and BYTE_MASK)
-            else DeviceVersionRead.Failure(MfiDiscoveryError.UnexpectedResponseLength(1, value.size))
+            if (value.size != 1) {
+                DeviceVersionRead.Failure(MfiDiscoveryError.UnexpectedResponseLength(1, value.size))
+            } else {
+                val deviceVersion = value[0].toInt() and BYTE_MASK
+                if (deviceVersion == 0x00 || deviceVersion == 0xff) {
+                    DeviceVersionRead.Failure(MfiDiscoveryError.InvalidDeviceVersion(deviceVersion))
+                } else {
+                    DeviceVersionRead.Success(deviceVersion)
+                }
+            }
         }
     } catch (error: I2cTransportException) {
         DeviceVersionRead.Failure(MfiDiscoveryError.Transport(error))
@@ -99,7 +107,8 @@ class MfiDeviceScanner(
         private const val READ_BIT = 0x01
         private const val BYTE_MASK = 0xff
         private const val PROBE_TIMEOUT_MILLIS = 2_000L
-        private const val RETRY_DELAY_MICROS = 500L
+        // A first NACK can merely wake a sleeping authentication coprocessor.
+        private const val RETRY_DELAY_MICROS = 20_000L
         private const val MICROS_PER_MILLISECOND = 1_000L
         private const val NANOS_PER_MICROSECOND = 1_000L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
@@ -134,5 +143,8 @@ sealed class MfiDiscoveryError {
     data class Transport(val cause: I2cTransportException) : MfiDiscoveryError()
 
     data class UnexpectedResponseLength(val expected: Int, val actual: Int) : MfiDiscoveryError()
+
+    /** CH341 returns all-zero/all-one bus data when no usable coprocessor answered. */
+    data class InvalidDeviceVersion(val actual: Int) : MfiDiscoveryError()
 
 }

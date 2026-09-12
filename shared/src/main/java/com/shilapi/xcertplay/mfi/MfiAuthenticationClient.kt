@@ -11,7 +11,7 @@ import com.shilapi.xcertplay.transport.I2cTransportException
  */
 class MfiAuthenticationClient(
     private val transport: I2cTransport,
-    private val address7Bit: Int,
+    val address7Bit: Int,
 ) {
     init {
         require(address7Bit in 0x00..0x7f) { "address7Bit must be in 0x00..0x7f" }
@@ -20,7 +20,7 @@ class MfiAuthenticationClient(
     /** Returns the raw value advertised by register 0x02; no protocol-major policy is imposed. */
     fun protocolMajor(): Int = readByte(PROTOCOL_MAJOR_REGISTER)
 
-    /** Reads the certificate length from 0x30 and its complete body once from 0x31. */
+    /** Reads the certificate length from 0x30 and its body through 128-byte register windows. */
     fun readCertificate(maximumOutputLength: Int = DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH): ByteArray {
         require(maximumOutputLength in 1..MAX_REGISTER_READ_BYTES) {
             "maximumOutputLength must be in 1..$MAX_REGISTER_READ_BYTES"
@@ -31,7 +31,16 @@ class MfiAuthenticationClient(
                 "Certificate length $length is outside 1..$maximumOutputLength",
             )
         }
-        return readRegister(CERTIFICATE_DATA_REGISTER, length)
+        val certificate = ByteArray(length)
+        var offset = 0
+        var register = CERTIFICATE_DATA_REGISTER
+        while (offset < certificate.size) {
+            val count = minOf(CERTIFICATE_REGISTER_WINDOW_BYTES, certificate.size - offset)
+            readRegister(register, count).copyInto(certificate, offset)
+            offset += count
+            register += 1
+        }
+        return certificate
     }
 
     /**
@@ -94,8 +103,11 @@ class MfiAuthenticationClient(
 
     private fun readRegister(register: Int, length: Int): ByteArray {
         require(length in 1..MAX_REGISTER_READ_BYTES) { "read length must be in 1..$MAX_REGISTER_READ_BYTES" }
-        selectRegister(register)
         return retryIo("read at 0x${register.toString(16).padStart(2, '0')}") {
+            // The coprocessor can be asleep when the register-select write arrives. CH341 does
+            // not surface that I2C NACK separately, so retry the complete select/read pair; a
+            // retry of only the pure-read half can otherwise keep reading the old register.
+            selectRegisterOnce(register)
             val result = transport.transaction(address7Bit, ByteArray(0), length)
             if (result.size != length) {
                 throw MfiInvalidDataException(
@@ -108,10 +120,14 @@ class MfiAuthenticationClient(
 
     private fun selectRegister(register: Int) {
         retryIo("register select 0x${register.toString(16).padStart(2, '0')}") {
-            val result = transport.transaction(address7Bit, byteArrayOf(register.toByte()), 0)
-            if (result.isNotEmpty()) {
-                throw MfiInvalidDataException("Register select 0x${register.toString(16)} returned data")
-            }
+            selectRegisterOnce(register)
+        }
+    }
+
+    private fun selectRegisterOnce(register: Int) {
+        val result = transport.transaction(address7Bit, byteArrayOf(register.toByte()), 0)
+        if (result.isNotEmpty()) {
+            throw MfiInvalidDataException("Register select 0x${register.toString(16)} returned data")
         }
     }
 
@@ -178,12 +194,13 @@ class MfiAuthenticationClient(
         private const val CHALLENGE_DATA_REGISTER = 0x21
         private const val CERTIFICATE_LENGTH_REGISTER = 0x30
         private const val CERTIFICATE_DATA_REGISTER = 0x31
+        private const val CERTIFICATE_REGISTER_WINDOW_BYTES = 128
         private const val AUTH_START_COMMAND = 0x01
         private const val AUTH_SUCCESS_STATUS = 0x10
         private const val MINIMUM_CHALLENGE_BYTES = 1
         private const val MAXIMUM_CHALLENGE_BYTES = 128
         private const val IO_RETRY_TIMEOUT_MILLIS = 2_000L
-        private const val IO_RETRY_DELAY_MICROS = 500L
+        private const val IO_RETRY_DELAY_MICROS = 20_000L
         private const val INITIAL_AUTH_DELAY_MILLIS = 10L
         private const val AUTH_POLL_MILLIS = 10L
         private const val AUTH_TIMEOUT_MILLIS = 3_000L

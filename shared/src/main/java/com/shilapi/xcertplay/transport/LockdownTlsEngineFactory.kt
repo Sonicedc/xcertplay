@@ -25,8 +25,10 @@ object LockdownTlsEngineFactory {
     @Throws(GeneralSecurityException::class)
     fun create(pairRecord: LockdownPairRecord): SSLEngine {
         val password = charArrayOf('l', 'o', 'c', 'k', 'd', 'o', 'w', 'n')
-        val privateKeyPem = pairRecord.hostPrivateKeyPem
-        val certificatePem = pairRecord.hostCertificatePem
+        // Lockdown presents the root identity from the pair record for both the session and
+        // service TLS channels. HostCertificate is part of pairing, not this TLS identity.
+        val privateKeyPem = pairRecord.rootPrivateKeyPem
+        val certificatePem = pairRecord.rootCertificatePem
         var privateKeyDer: ByteArray? = null
         try {
             privateKeyDer = decodePkcs8Pem(privateKeyPem)

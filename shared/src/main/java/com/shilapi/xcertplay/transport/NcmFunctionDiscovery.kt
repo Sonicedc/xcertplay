@@ -23,13 +23,13 @@ object NcmFunctionDiscovery {
     data class NcmFunction(
         val control: UsbInterface,
         val data: UsbInterface,
+        val statusIn: UsbEndpoint?,
         val bulkIn: UsbEndpoint,
         val bulkOut: UsbEndpoint,
     )
 
     fun find(configuration: UsbConfiguration): NcmFunction? {
-        findCdcNcm(configuration)?.let { return it }
-        return findAppleEthernet(configuration)
+        return findCdcNcm(configuration)
     }
 
     private fun findCdcNcm(configuration: UsbConfiguration): NcmFunction? {
@@ -41,23 +41,13 @@ object NcmFunctionDiscovery {
             .minByOrNull { if (it.alternateSetting == DATA_ALTERNATE_SETTING) 0 else 1 }
             ?: return null
         val endpoints = bulkEndpoints(data) ?: return null
-        return NcmFunction(control, data, endpoints.first, endpoints.second)
-    }
-
-    /**
-     * Apple's vendor-specific Ethernet function: alt 0 is the control interface without
-     * endpoints, and the lowest non-zero alternate setting carries the bulk pair.
-     */
-    private fun findAppleEthernet(configuration: UsbConfiguration): NcmFunction? {
-        val apple = interfaces(configuration).filter {
-            it.interfaceClass == APPLE_ETHERNET_CLASS &&
-                it.interfaceSubclass == APPLE_ETHERNET_SUBCLASS &&
-                it.interfaceProtocol == APPLE_ETHERNET_PROTOCOL
-        }
-        val control = apple.firstOrNull { it.endpointCount == 0 } ?: return null
-        val data = apple.filter { bulkEndpoints(it) != null }.minByOrNull { it.alternateSetting } ?: return null
-        val endpoints = bulkEndpoints(data) ?: return null
-        return NcmFunction(control, data, endpoints.first, endpoints.second)
+        val statusIn = (0 until control.endpointCount)
+            .map(control::getEndpoint)
+            .singleOrNull {
+                it.direction == UsbConstants.USB_DIR_IN &&
+                    it.type == UsbConstants.USB_ENDPOINT_XFER_INT
+            }
+        return NcmFunction(control, data, statusIn, endpoints.first, endpoints.second)
     }
 
     private fun interfaces(configuration: UsbConfiguration): List<UsbInterface> =

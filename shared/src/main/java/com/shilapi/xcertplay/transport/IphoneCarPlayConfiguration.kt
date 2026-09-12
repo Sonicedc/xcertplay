@@ -16,7 +16,6 @@ import android.util.Log
 object IphoneCarPlayConfiguration {
     const val TAG = "xcertplay-usb"
 
-    private const val FALLBACK_CONFIGURATION_ID = 6
     private const val USBMUX_CLASS = 0xff
     private const val USBMUX_SUBCLASS = 0xfe
     private const val USBMUX_PROTOCOL = 0x02
@@ -32,9 +31,6 @@ object IphoneCarPlayConfiguration {
         val configurations = (0 until device.configurationCount).map(device::getConfiguration)
         val chosen = configurations.firstOrNull { usbMuxInterface(it) != null && hasCdcNcm(it) && hasAppleEthernet(it) }
             ?: configurations.firstOrNull { usbMuxInterface(it) != null && hasCdcNcm(it) }
-            ?: configurations.firstOrNull { usbMuxInterface(it) != null && hasAppleEthernet(it) }
-            ?: configurations.firstOrNull { usbMuxInterface(it) != null }
-            ?: configurations.firstOrNull { it.id == FALLBACK_CONFIGURATION_ID }
         Log.i(
             TAG,
             "carplay config chosen=${chosen?.id} " +

@@ -5,6 +5,7 @@ import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.util.Log
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.AudioFormat
@@ -20,7 +21,11 @@ import java.util.concurrent.LinkedBlockingQueue
  * decoded with MediaCodec onto a Surface; audio streams are decoded to PCM and
  * played through AudioTrack. Call [close] when the session tears down.
  */
-class AndroidMediaSink(surface: Surface? = null) : MediaSink {
+class AndroidMediaSink(
+    surface: Surface? = null,
+    private val videoWidth: Int = 1280,
+    private val videoHeight: Int = 720,
+) : MediaSink {
     private val defaultSurface = surface
     private val surfaces = ConcurrentHashMap<Int, Surface>()
     private val videoDecoders = ConcurrentHashMap<Int, VideoDecoder>()
@@ -29,6 +34,11 @@ class AndroidMediaSink(surface: Surface? = null) : MediaSink {
 
     fun setSurface(type: Int, surface: Surface) {
         surfaces[type] = surface
+        videoDecoders[type]?.setSurface(surface)
+    }
+
+    fun clearSurface(type: Int, surface: Surface) {
+        if (surfaces.remove(type, surface)) videoDecoders[type]?.setSurface(null)
     }
 
     override fun onVideoCodec(type: Int, codec: VideoCodec) {
@@ -60,7 +70,9 @@ class AndroidMediaSink(surface: Surface? = null) : MediaSink {
     }
 
     private fun videoDecoder(type: Int): VideoDecoder =
-        videoDecoders.computeIfAbsent(type) { VideoDecoder(surfaces[type] ?: defaultSurface) }
+        videoDecoders.computeIfAbsent(type) {
+            VideoDecoder(surfaces[type] ?: defaultSurface, videoWidth, videoHeight)
+        }
 
     private fun audioRenderer(type: Int, format: AudioFormat): AudioRenderer =
         audioRenderers.computeIfAbsent(type) { AudioRenderer(format) }
@@ -69,13 +81,22 @@ class AndroidMediaSink(surface: Surface? = null) : MediaSink {
 private sealed interface VideoJob {
     data class Config(val codec: VideoCodec, val codecData: ByteArray) : VideoJob
     data class Frame(val nalus: ByteArray) : VideoJob
+    data class SurfaceChanged(val surface: Surface?) : VideoJob
 }
 
 /** Serial MediaCodec video decoder: one worker owns configure and frame feeding. */
-private class VideoDecoder(private val surface: Surface?) : Closeable {
+private class VideoDecoder(
+    surface: Surface?,
+    private val width: Int,
+    private val height: Int,
+) : Closeable {
     private val queue = LinkedBlockingQueue<VideoJob>()
     @Volatile private var running = true
     @Volatile private var decoder: MediaCodec? = null
+    private var outputSurface: Surface? = surface
+    private var lastConfig: VideoJob.Config? = null
+    private var renderedFrameLogged = false
+    private var submittedFrameLogged = false
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true; start() }
 
     fun configure(codec: VideoCodec, codecData: ByteArray) {
@@ -86,18 +107,28 @@ private class VideoDecoder(private val surface: Surface?) : Closeable {
         queue.offer(VideoJob.Frame(nalus))
     }
 
+    fun setSurface(surface: Surface?) {
+        queue.offer(VideoJob.SurfaceChanged(surface))
+    }
+
     override fun close() {
         running = false
         thread.interrupt()
-        releaseDecoder()
     }
 
     private fun run() {
         try {
             while (running) {
-                when (val job = queue.take()) {
-                    is VideoJob.Config -> configureDecoder(job.codec, job.codecData)
-                    is VideoJob.Frame -> feed(job.nalus)
+                val job = queue.take()
+                try {
+                    when (job) {
+                        is VideoJob.Config -> configureDecoder(job)
+                        is VideoJob.Frame -> feed(job.nalus)
+                        is VideoJob.SurfaceChanged -> changeSurface(job.surface)
+                    }
+                } catch (error: Exception) {
+                    if (running) Log.e(TAG, "video decoder job failed: ${job.javaClass.simpleName}", error)
+                    releaseDecoder()
                 }
             }
         } catch (_: InterruptedException) {
@@ -107,35 +138,62 @@ private class VideoDecoder(private val surface: Surface?) : Closeable {
         }
     }
 
-    private fun configureDecoder(codec: VideoCodec, codecData: ByteArray) {
+    private fun configureDecoder(config: VideoJob.Config) {
+        lastConfig = config
         releaseDecoder()
+        val surface = outputSurface ?: return
+        val codec = config.codec
+        val codecData = config.codecData
         val mime = if (codec == VideoCodec.H265) MediaFormat.MIMETYPE_VIDEO_HEVC
         else MediaFormat.MIMETYPE_VIDEO_AVC
-        val format = MediaFormat().apply {
-            setString(MediaFormat.KEY_MIME, mime)
+        val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
         }
         if (codec == VideoCodec.H265) {
             if (codecData.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(codecData))
         } else {
             val (sps, pps) = MediaCodecSupport.avcParameterSets(codecData)
-            if (sps.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
-            if (pps.isNotEmpty()) format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+            if (sps.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
+            if (pps.isNotEmpty()) format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
         }
         val next = try {
             MediaCodec.createDecoderByType(mime).also {
                 it.configure(format, surface, null, 0)
                 it.start()
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.e(TAG, "video decoder configure failed mime=$mime size=${width}x$height", error)
             null
         }
         decoder = next
+        renderedFrameLogged = false
+        submittedFrameLogged = false
+        if (next != null) Log.i(TAG, "video decoder configured mime=$mime size=${width}x$height")
+    }
+
+    private fun changeSurface(surface: Surface?) {
+        if (outputSurface === surface) return
+        outputSurface = surface
+        releaseDecoder()
+        if (surface == null) {
+            Log.i(TAG, "video decoder detached from surface")
+        } else {
+            lastConfig?.let(::configureDecoder)
+        }
     }
 
     private fun feed(nalus: ByteArray) {
         val codec = decoder ?: return
         val annexB = MediaCodecSupport.toAnnexB(nalus)
+        if (!submittedFrameLogged) {
+            submittedFrameLogged = true
+            Log.i(
+                TAG,
+                "video decoder first input avcc=${nalus.size} annexB=${annexB.size} " +
+                    "head=${annexB.take(16).joinToString("") { "%02x".format(it.toInt() and 0xff) }}",
+            )
+        }
+        if (annexB.isEmpty()) return
         val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
         if (index < 0) return
         val input = codec.getInputBuffer(index) ?: return
@@ -157,7 +215,12 @@ private class VideoDecoder(private val surface: Surface?) : Closeable {
                 index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                 index >= 0 -> {
-                    codec.releaseOutputBuffer(index, surface != null && info.size > 0)
+                    val render = outputSurface != null
+                    codec.releaseOutputBuffer(index, render)
+                    if (render && !renderedFrameLogged) {
+                        renderedFrameLogged = true
+                        Log.i(TAG, "video decoder rendered first frame bytes=${info.size}")
+                    }
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
                 }
                 else -> return
@@ -184,8 +247,10 @@ private class VideoDecoder(private val surface: Surface?) : Closeable {
     }
 
     private companion object {
+        const val TAG = "xcertplay-usb"
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
         const val INPUT_TIMEOUT_US = 10_000L
+        val START_CODE = byteArrayOf(0x00, 0x00, 0x00, 0x01)
     }
 }
 
@@ -212,7 +277,6 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
     override fun close() {
         running = false
         thread.interrupt()
-        release()
     }
 
     private fun run() {
@@ -222,6 +286,8 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
             while (running) handle(queue.take())
         } catch (_: InterruptedException) {
             // Worker shut down.
+        } catch (error: Exception) {
+            if (running) Log.e(TAG, "audio renderer worker failed", error)
         } finally {
             release()
         }
@@ -379,6 +445,7 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
     }
 
     private companion object {
+        const val TAG = "xcertplay-usb"
         const val INPUT_TIMEOUT_US = 10_000L
     }
 }

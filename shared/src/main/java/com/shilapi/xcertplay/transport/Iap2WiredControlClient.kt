@@ -1,7 +1,6 @@
 package com.shilapi.xcertplay.transport
 
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
-import java.io.ByteArrayOutputStream
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -23,6 +22,7 @@ class Iap2WiredControlClient(
         availableCurrentMilliAmps: Int,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         onIncoming: (CsmFrame) -> Unit = {},
+        onProgress: (String) -> Unit = {},
     ): Iap2WiredControlResult {
         require(availableCurrentMilliAmps in 0..0xffff) {
             "availableCurrentMilliAmps must be in 0..65535"
@@ -33,13 +33,16 @@ class Iap2WiredControlClient(
 
         val deadlineNanos = deadlineAfter(timeoutMillis)
         Iap2IdentificationClient(channel).identify(identification, requireRemaining(deadlineNanos))
+        onProgress("iap2 identification accepted")
         var stage = Iap2WiredControlStage.IDENTIFIED
-        mfi.run(channel, requireRemaining(deadlineNanos))
+        mfi.run(channel, requireRemaining(deadlineNanos), onProgress)
         stage = Iap2WiredControlStage.AUTHENTICATED
+        onProgress("iap2 authentication accepted")
 
         send(powerSourceUpdate(availableCurrentMilliAmps), deadlineNanos)
         for (subscription in subscriptions()) send(subscription, deadlineNanos)
         stage = Iap2WiredControlStage.SUBSCRIBED
+        onProgress("iap2 power/subscriptions sent")
 
         var forwardedFrames = 0
         var carPlayStartSessions = 0
@@ -56,12 +59,16 @@ class Iap2WiredControlClient(
                     carPlayStartSessions,
                 )
             if (incoming.messageId == CARPLAY_AVAILABILITY) {
+                onProgress("iap2 rx=0x4300 carplay-availability")
+                onProgress(carPlayAvailabilitySummary(incoming.payload))
                 // LIVI sends its wired answer on every availability notification; do not gate it on
                 // the phone's advertised availability boolean.
                 send(carPlayStartSession(endpoint), deadlineNanos)
                 stage = Iap2WiredControlStage.CARPLAY_START_SENT
                 carPlayStartSessions++
+                onProgress("iap2 tx=0x4301 carplay-start-session")
             } else {
+                onProgress("iap2 rx=0x${incoming.messageId.toString(16).padStart(4, '0')}")
                 onIncoming(incoming)
                 forwardedFrames++
             }
@@ -112,9 +119,14 @@ class Iap2WiredControlClient(
 
         /** Builds the wired-only CarPlayStartSession message; no NCM or AirPlay socket is opened. */
         fun carPlayStartSession(endpoint: Iap2WiredCarPlayEndpoint): CsmFrame {
-            val wired = ByteArrayOutputStream().apply {
-                endpoint.ipv6Addresses.forEach { write(nulTerminated(it)) }
-            }.toByteArray()
+            // Parameter 0 is a wired-attributes group. Each address is itself a nested parameter
+            // 0 inside that group; placing the raw string directly in the outer parameter makes
+            // an otherwise valid 0x4301 undecodable by the phone.
+            val wired = Iap2CsmParameters.encode(
+                endpoint.ipv6Addresses.map { address ->
+                    Iap2CsmParameter(0, nulTerminated(address))
+                },
+            )
             val parameters = ArrayList<Iap2CsmParameter>(5)
             parameters += Iap2CsmParameter(0, wired)
             parameters += Iap2CsmParameter(2, u32(endpoint.airPlayPort))
@@ -122,6 +134,23 @@ class Iap2WiredControlClient(
             parameters += Iap2CsmParameter(4, nulTerminated(endpoint.publicKey))
             parameters += Iap2CsmParameter(5, nulTerminated(endpoint.sourceVersion))
             return CsmFrame(CARPLAY_START_SESSION, Iap2CsmParameters.encode(parameters))
+        }
+
+        fun carPlayAvailabilitySummary(payload: ByteArray): String {
+            return try {
+                val outer = Iap2CsmParameters.parse(payload)
+                val wired = outer.firstOrNull { it.id == 0 }?.payload
+                    ?.let(Iap2CsmParameters::parse)
+                    .orEmpty()
+                val available = wired.firstOrNull { it.id == 0 }?.payload?.firstOrNull()
+                    ?.let { it.toInt() and 0xff }
+                val transport = wired.firstOrNull { it.id == 1 }?.payload
+                    ?.decodeToString()
+                    ?.trimEnd('\u0000')
+                "iap2 4300 wiredAvailable=$available usbTransport=${transport ?: "none"}"
+            } catch (error: RuntimeException) {
+                "iap2 4300 decode failed: ${error.message}"
+            }
         }
 
         private fun frame(messageId: Int, vararg parameters: Iap2CsmParameter): CsmFrame =

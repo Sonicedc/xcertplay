@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.transport
 
+import android.util.Log
 import java.io.Closeable
 import java.util.ArrayDeque
 
@@ -20,11 +21,17 @@ class Iap2UsbMuxHost private constructor(
     private var closed = false
     private var failure: IphoneUsbException? = null
     private var nextMuxSequence = 0
+    private var nextMuxAcknowledgement = 0
     private var nextSourcePort = FIRST_SOURCE_PORT
     private lateinit var readerThread: Thread
     private var receiveBuffer = ByteArray(0)
 
-    private data class MuxFrame(val protocol: Int, val payload: ByteArray)
+    private data class MuxFrame(
+        val protocol: Int,
+        val length: Int,
+        val word8: Int,
+        val payload: ByteArray,
+    )
 
     /** Opens a TCP byte stream to the iPhone service on [destinationPort]. */
     fun connect(
@@ -105,13 +112,38 @@ class Iap2UsbMuxHost private constructor(
         putU32(version, 4, VERSION_MESSAGE_BYTES)
         putU32(version, 8, USBMUX_VERSION)
         pipe.write(version, HANDSHAKE_TIMEOUT_MILLIS.toInt())
-        // Parse the version reply as a real frame; any bytes that arrive with it stay buffered for
-        // the reader thread instead of being discarded.
+        // The phone replies with the same proto=0, length=20, version=2 packet. Protocol 1 is not
+        // a distinct "version reply" here; waiting for it discards the valid reply and times out.
+        val deadline = System.nanoTime() + HANDSHAKE_TIMEOUT_MILLIS * NANOS_PER_MILLISECOND
+        var staleFrames = 0
+        var reply: MuxFrame
         while (true) {
-            val frame = takeFrame(HANDSHAKE_TIMEOUT_MILLIS)
+            val remainingNanos = deadline - System.nanoTime()
+            if (remainingNanos <= 0) {
+                throw IphoneUsbException.TimedOut("Timed out waiting for the USBMUX version reply")
+            }
+            val remainingMillis = (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND
+            reply = takeFrame(remainingMillis)
                 ?: throw IphoneUsbException.TimedOut("Timed out waiting for the USBMUX version reply")
-            if (frame.protocol == PROTOCOL_VERSION_REPLY) break
+            if (
+                reply.protocol == PROTOCOL_VERSION &&
+                reply.length == VERSION_MESSAGE_BYTES &&
+                reply.word8 == USBMUX_VERSION
+            ) {
+                break
+            }
+            // Android can leave already-received TCP payloads queued in the bulk endpoint when
+            // an app process is replaced. They belong to the previous host instance and must not
+            // be mistaken for the version reply sent in response to the new handshake.
+            if (reply.protocol != PROTOCOL_TCP || ++staleFrames > MAX_STALE_HANDSHAKE_FRAMES) {
+                throw IphoneUsbException.Protocol(
+                    "Invalid USBMUX version reply: proto=${reply.protocol} " +
+                        "length=${reply.length} version=${reply.word8}",
+                )
+            }
+            Log.i("xcertplay-usb", "discarding stale usbmux TCP frame before version reply")
         }
+        Log.i("xcertplay-usb", "usbmux version accepted: ${reply.word8}")
         sendFrame(PROTOCOL_SETUP, byteArrayOf(SETUP_VALUE.toByte()))
         readerThread = Thread(::readerLoop, "iap2-usbmux-reader").apply {
             isDaemon = true
@@ -131,13 +163,19 @@ class Iap2UsbMuxHost private constructor(
                         throw IphoneUsbException.Protocol("Invalid USBMUX frame length $length")
                     }
                     if (receiveBuffer.size >= length) {
-                        if (readU32(receiveBuffer, 8) != MUX_MAGIC) {
-                            throw IphoneUsbException.Protocol("Invalid USBMUX frame magic")
-                        }
+                        // LIVI only trusts the length field on receive: iPhone replies do not
+                        // carry the 0xFEEDFACE word in the header's fourth field.
+                        Log.i(
+                            "xcertplay-usb",
+                            "usbmux rx proto=${readU32(receiveBuffer, 0)} length=$length word8=0x" +
+                                readU32(receiveBuffer, 8).toUInt().toString(16),
+                        )
                         val protocol = readU32(receiveBuffer, 0)
+                        val word8 = readU32(receiveBuffer, 8)
+                        nextMuxAcknowledgement = readU16(receiveBuffer, 12)
                         val payload = receiveBuffer.copyOfRange(MUX_HEADER_BYTES, length)
                         receiveBuffer = receiveBuffer.copyOfRange(length, receiveBuffer.size)
-                        return MuxFrame(protocol, payload)
+                        return MuxFrame(protocol, length, word8, payload)
                     }
                 }
             }
@@ -152,15 +190,16 @@ class Iap2UsbMuxHost private constructor(
     }
 
     private fun sendFrame(protocol: Int, payload: ByteArray) = synchronized(writeLock) {
-        val sequence = synchronized(stateLock) {
+        val sequenceAndAcknowledgement = synchronized(stateLock) {
             checkOpenLocked()
-            nextMuxSequence
+            nextMuxSequence to nextMuxAcknowledgement
         }
         val frame = ByteArray(MUX_HEADER_BYTES + payload.size)
         putU32(frame, 0, protocol)
         putU32(frame, 4, frame.size)
         putU32(frame, 8, MUX_MAGIC)
-        putU16(frame, 12, sequence)
+        putU16(frame, 12, sequenceAndAcknowledgement.first)
+        putU16(frame, 14, sequenceAndAcknowledgement.second)
         payload.copyInto(frame, MUX_HEADER_BYTES)
         try {
             pipe.write(frame, WRITE_TIMEOUT_MILLIS)
@@ -237,7 +276,6 @@ class Iap2UsbMuxHost private constructor(
         const val LOCKDOWN_PORT = 62078
 
         private const val PROTOCOL_VERSION = 0
-        private const val PROTOCOL_VERSION_REPLY = 1
         private const val PROTOCOL_SETUP = 2
         private const val PROTOCOL_TCP = 6
         private const val USBMUX_VERSION = 2
@@ -250,7 +288,8 @@ class Iap2UsbMuxHost private constructor(
         private const val TCP_WINDOW_FIELD = 512
         private const val MAX_FRAME_BYTES = 65_536
         private const val FIRST_SOURCE_PORT = 1
-        private const val HANDSHAKE_TIMEOUT_MILLIS = 2_000L
+        private const val HANDSHAKE_TIMEOUT_MILLIS = 60_000L
+        private const val MAX_STALE_HANDSHAKE_FRAMES = 32
         private const val CONNECT_TIMEOUT_MILLIS = 5_000L
         private const val WRITE_TIMEOUT_MILLIS = 2_000
         private const val CLOSE_JOIN_MARGIN_MILLIS = 100L

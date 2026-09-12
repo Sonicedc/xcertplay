@@ -17,27 +17,42 @@ class Iap2MfiAuthenticationClient(
     }
 
     /** Blocks until the phone confirms AA05, or throws a typed authentication failure. */
-    fun run(channel: Iap2CsmChannel, timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS) {
+    fun run(
+        channel: Iap2CsmChannel,
+        timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+        onProgress: (String) -> Unit = {},
+    ) {
         require(timeoutMillis in 1..MAX_TIMEOUT_MILLIS) {
             "timeoutMillis must be in 1..$MAX_TIMEOUT_MILLIS"
         }
         val deadlineNanos = deadlineAfter(timeoutMillis)
         val certificate = authentication.readCertificate(maximumCertificateLength)
+        onProgress("mfi certificate loaded bytes=${certificate.size}")
         while (true) {
             val remaining = remainingMillis(deadlineNanos)
             if (remaining == 0L) throw Iap2MfiAuthenticationException("Timed out waiting for iAP2 MFi authentication")
             val frame = channel.recv(remaining)
                 ?: throw Iap2MfiAuthenticationException("Timed out waiting for iAP2 MFi authentication")
             when (frame.messageId) {
-                REQUEST_CERTIFICATE -> send(channel, CERTIFICATE, certificate, deadlineNanos)
+                REQUEST_CERTIFICATE -> {
+                    onProgress("iap2 mfi rx=0xaa00 request-certificate")
+                    send(channel, CERTIFICATE, certificate, deadlineNanos)
+                    onProgress("iap2 mfi tx=0xaa01 certificate bytes=${certificate.size}")
+                }
                 REQUEST_CHALLENGE -> {
                     val challenge = requireParameterZero(frame)
                     if (challenge.size !in 1..MAXIMUM_CHALLENGE_BYTES) {
                         throw Iap2MfiAuthenticationException("Invalid iAP2 MFi challenge length ${challenge.size}")
                     }
-                    send(channel, RESPONSE, authentication.signChallenge(challenge), deadlineNanos)
+                    onProgress("iap2 mfi rx=0xaa02 challenge bytes=${challenge.size}")
+                    val signature = authentication.signChallenge(challenge)
+                    send(channel, RESPONSE, signature, deadlineNanos)
+                    onProgress("iap2 mfi tx=0xaa03 signature bytes=${signature.size}")
                 }
-                AUTHENTICATION_SUCCEEDED -> return
+                AUTHENTICATION_SUCCEEDED -> {
+                    onProgress("iap2 mfi rx=0xaa05 authentication-succeeded")
+                    return
+                }
                 AUTHENTICATION_FAILED -> throw Iap2MfiAuthenticationException("iPhone sent AuthenticationFailed")
                 else -> throw Iap2MfiAuthenticationException(
                     "Unexpected iAP2 MFi message 0x${frame.messageId.toString(16).padStart(4, '0')}",

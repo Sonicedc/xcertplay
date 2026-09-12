@@ -8,6 +8,32 @@ import org.junit.Test
 
 class MfiSelfCheckTest {
     @Test
+    fun ignoresFloatingBusValueAndSelectsRealSecondCandidate() {
+        var selectedRegister = -1
+        val transport = object : I2cTransport {
+            override fun transaction(address7Bit: Int, writeData: ByteArray, readLength: Int): ByteArray {
+                if (writeData.isNotEmpty()) {
+                    selectedRegister = writeData.single().toInt() and 0xff
+                    return ByteArray(0)
+                }
+                return when {
+                    selectedRegister != 0x00 || readLength != 1 ->
+                        throw I2cTransportException.Nack("unexpected request")
+                    address7Bit == 0x10 -> bytes(0xff)
+                    address7Bit == 0x11 -> bytes(0x07)
+                    else -> throw I2cTransportException.Nack("unexpected address")
+                }
+            }
+        }
+
+        val result = MfiDeviceScanner(transport).scan()
+
+        assertEquals(0x11, result.chip?.address7Bit)
+        assertEquals(0x07, result.chip?.deviceVersion)
+        assertTrue(result.failures.single().error is MfiDiscoveryError.InvalidDeviceVersion)
+    }
+
+    @Test
     fun fallsBackToSecondCandidateThenReportsRawProtocolMajor() {
         val calls = mutableListOf<Pair<Int, Int>>()
         val transport = object : I2cTransport {

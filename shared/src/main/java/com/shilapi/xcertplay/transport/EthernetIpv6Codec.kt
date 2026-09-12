@@ -41,6 +41,85 @@ object EthernetIpv6Codec {
         return frame
     }
 
+    /** Maps an IPv6 multicast destination to its Ethernet 33:33:xx:xx:xx:xx address. */
+    fun multicastDestinationMac(ipv6: ByteArray): ByteArray? {
+        if (ipv6.size < IPV6_HEADER_BYTES || (ipv6[0].toInt() ushr 4 and 0x0f) != 6) return null
+        if ((ipv6[IPV6_DESTINATION_OFFSET].toInt() and 0xff) != 0xff) return null
+        return byteArrayOf(
+            0x33,
+            0x33,
+            ipv6[IPV6_DESTINATION_OFFSET + 12],
+            ipv6[IPV6_DESTINATION_OFFSET + 13],
+            ipv6[IPV6_DESTINATION_OFFSET + 14],
+            ipv6[IPV6_DESTINATION_OFFSET + 15],
+        )
+    }
+
+    /**
+     * A TUN interface has no layer-2 address, so Android emits Neighbor Advertisements without a
+     * Target Link-Layer Address option. Add the option required by the Ethernet peer and repair
+     * the IPv6 payload length and ICMPv6 checksum.
+     */
+    fun addNeighborAdvertisementTargetMac(ipv6: ByteArray, hostMac: ByteArray): ByteArray {
+        require(hostMac.size == MAC_BYTES) { "hostMac must be $MAC_BYTES bytes" }
+        if (ipv6.size < ICMPV6_NA_MIN_BYTES || (ipv6[0].toInt() ushr 4 and 0x0f) != 6) return ipv6
+        if ((ipv6[IPV6_NEXT_HEADER_OFFSET].toInt() and 0xff) != ICMPV6_NEXT_HEADER ||
+            (ipv6[IPV6_HEADER_BYTES].toInt() and 0xff) != ICMPV6_NEIGHBOR_ADVERTISEMENT
+        ) return ipv6
+
+        val payloadBytes = readU16(ipv6, IPV6_PAYLOAD_LENGTH_OFFSET)
+        if (payloadBytes < ICMPV6_NA_BYTES || IPV6_HEADER_BYTES + payloadBytes > ipv6.size) return ipv6
+        var optionOffset = IPV6_HEADER_BYTES + ICMPV6_NA_BYTES
+        val payloadEnd = IPV6_HEADER_BYTES + payloadBytes
+        while (optionOffset + 2 <= payloadEnd) {
+            val optionBytes = (ipv6[optionOffset + 1].toInt() and 0xff) * 8
+            if (optionBytes == 0 || optionOffset + optionBytes > payloadEnd) break
+            if ((ipv6[optionOffset].toInt() and 0xff) == ICMPV6_TARGET_LINK_LAYER_OPTION &&
+                optionBytes >= 8
+            ) {
+                return ipv6.copyOf().also { result ->
+                    hostMac.copyInto(result, optionOffset + 2)
+                    writeIcmpv6Checksum(result)
+                }
+            }
+            optionOffset += optionBytes
+        }
+
+        val result = ipv6.copyOf(payloadEnd + 8)
+        result[IPV6_PAYLOAD_LENGTH_OFFSET] = ((payloadBytes + 8) ushr 8).toByte()
+        result[IPV6_PAYLOAD_LENGTH_OFFSET + 1] = (payloadBytes + 8).toByte()
+        result[payloadEnd] = ICMPV6_TARGET_LINK_LAYER_OPTION.toByte()
+        result[payloadEnd + 1] = 1
+        hostMac.copyInto(result, payloadEnd + 2)
+        writeIcmpv6Checksum(result)
+        return result
+    }
+
+    private fun writeIcmpv6Checksum(ipv6: ByteArray) {
+        val payloadBytes = readU16(ipv6, IPV6_PAYLOAD_LENGTH_OFFSET)
+        ipv6[IPV6_HEADER_BYTES + 2] = 0
+        ipv6[IPV6_HEADER_BYTES + 3] = 0
+        var sum = 0L
+        fun addWords(start: Int, bytes: Int) {
+            var offset = start
+            val end = start + bytes
+            while (offset + 1 < end) {
+                sum += readU16(ipv6, offset).toLong()
+                offset += 2
+            }
+            if (offset < end) sum += (ipv6[offset].toInt() and 0xff).toLong() shl 8
+        }
+        addWords(IPV6_SOURCE_OFFSET, 32)
+        sum += (payloadBytes ushr 16).toLong()
+        sum += (payloadBytes and 0xffff).toLong()
+        sum += ICMPV6_NEXT_HEADER.toLong()
+        addWords(IPV6_HEADER_BYTES, payloadBytes)
+        while (sum ushr 16 != 0L) sum = (sum and 0xffff) + (sum ushr 16)
+        val checksum = sum.inv().toInt() and 0xffff
+        ipv6[IPV6_HEADER_BYTES + 2] = (checksum ushr 8).toByte()
+        ipv6[IPV6_HEADER_BYTES + 3] = checksum.toByte()
+    }
+
     private fun putU16(target: ByteArray, offset: Int, value: Int) {
         target[offset] = (value ushr 8).toByte()
         target[offset + 1] = value.toByte()
@@ -48,4 +127,15 @@ object EthernetIpv6Codec {
 
     private fun readU16(source: ByteArray, offset: Int): Int =
         ((source[offset].toInt() and 0xff) shl 8) or (source[offset + 1].toInt() and 0xff)
+
+    private const val IPV6_HEADER_BYTES = 40
+    private const val IPV6_PAYLOAD_LENGTH_OFFSET = 4
+    private const val IPV6_NEXT_HEADER_OFFSET = 6
+    private const val IPV6_SOURCE_OFFSET = 8
+    private const val IPV6_DESTINATION_OFFSET = 24
+    private const val ICMPV6_NEXT_HEADER = 58
+    private const val ICMPV6_NEIGHBOR_ADVERTISEMENT = 136
+    private const val ICMPV6_NA_BYTES = 24
+    private const val ICMPV6_NA_MIN_BYTES = IPV6_HEADER_BYTES + ICMPV6_NA_BYTES
+    private const val ICMPV6_TARGET_LINK_LAYER_OPTION = 2
 }

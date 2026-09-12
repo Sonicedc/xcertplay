@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.transport
 
+import android.util.Log
 import java.io.IOException
 import java.security.GeneralSecurityException
 
@@ -25,14 +26,12 @@ class LockdownPairingClient(
     @Throws(IphoneUsbException::class, LockdownPairingException::class, GeneralSecurityException::class)
     fun pair(
         label: String,
-        hostName: String,
         hostId: String,
         systemBuid: String,
         totalTimeoutMillis: Long,
         isCancelled: () -> Boolean = { false },
     ): PairedRecord {
         require(label.isNotBlank()) { "label must not be blank" }
-        require(hostName.isNotBlank()) { "hostName must not be blank" }
         require(hostId.isNotBlank()) { "hostId must not be blank" }
         require(systemBuid.isNotBlank()) { "systemBuid must not be blank" }
         require(totalTimeoutMillis in 1..MAXIMUM_TOTAL_TIMEOUT_MILLIS) {
@@ -40,49 +39,111 @@ class LockdownPairingClient(
         }
 
         val deadline = Deadline(totalTimeoutMillis)
-        checkCancelled(isCancelled)
-        val connection = host.connect(
-            destinationPort = Iap2UsbMuxHost.LOCKDOWN_PORT,
-            timeoutMillis = stepTimeoutMillis(deadline),
-        )
-        LockdownPlistChannel(connection).use { channel ->
-            val devicePublicKey = getValue(channel, label, "DevicePublicKey", deadline, isCancelled)
-                as? LockdownPlistValue.Data
-                ?: throw LockdownPairingException.InvalidResponse("DevicePublicKey was not data")
-            val wifiAddress = getValue(channel, label, "WiFiAddress", deadline, isCancelled)
-                as? LockdownPlistValue.Text
-                ?: throw LockdownPairingException.InvalidResponse("WiFiAddress was not text")
-            val pairRecord = LockdownPairRecordGenerator.generate(
-                devicePublicKeyPkcs1Pem = devicePublicKey.bytes,
-                wifiAddress = wifiAddress.value,
-                hostId = hostId,
-                systemBuid = systemBuid,
+        var pairRecord: LockdownPairRecord? = null
+        var attempt = 0
+        while (true) {
+            checkCancelled(isCancelled)
+            attempt += 1
+            val connection = host.connect(
+                destinationPort = Iap2UsbMuxHost.LOCKDOWN_PORT,
+                timeoutMillis = stepTimeoutMillis(deadline),
             )
-            val request = LockdownPlistValue.Dictionary(
-                linkedMapOf(
-                    "Label" to LockdownPlistValue.Text(label),
-                    "Request" to LockdownPlistValue.Text("Pair"),
-                    "HostName" to LockdownPlistValue.Text(hostName),
-                    "ProtocolVersion" to LockdownPlistValue.Text("2"),
-                    "PairingOptions" to LockdownPlistValue.Dictionary(
-                        linkedMapOf("ExtendedPairingErrors" to LockdownPlistValue.Boolean(true)),
-                    ),
-                    "PairRecord" to pairRecord.toPairRequestDictionary(),
-                ),
-            )
-            while (true) {
-                checkCancelled(isCancelled)
-                val response = channel.request(request, stepTimeoutMillis(deadline))
+            var pending = false
+            LockdownPlistChannel(connection).use { channel ->
+                setUntrustedHostBuid(channel, label, systemBuid, deadline, isCancelled)
+                val record = pairRecord ?: generatePairRecord(
+                    channel = channel,
+                    label = label,
+                    hostId = hostId,
+                    systemBuid = systemBuid,
+                    deadline = deadline,
+                    isCancelled = isCancelled,
+                ).also {
+                    pairRecord = it
+                    Log.i(
+                        TAG,
+                        "lockdown pair prepared hostId=uuid systemBuid=uuid " +
+                            "deviceKey=${it.devicePublicKeyPem.size} deviceCert=${it.deviceCertificatePem.size} " +
+                            "hostCert=${it.hostCertificatePem.size} rootCert=${it.rootCertificatePem.size}",
+                    )
+                }
+                Log.i(TAG, "lockdown pair attempt=$attempt")
+                val response = channel.request(pairRequest(label, record), stepTimeoutMillis(deadline))
                 checkCancelled(isCancelled)
                 when (val error = response.errorCodeOrNull()) {
-                    null -> return PairedRecord(pairRecord, response.entries["EscrowBag"].asOptionalData())
-                    "PairingDialogResponsePending" -> waitForRetry(deadline, isCancelled)
+                    null -> return PairedRecord(record, response.entries["EscrowBag"].asOptionalData())
+                    "PairingDialogResponsePending" -> pending = true
                     "UserDeniedPairing" -> throw LockdownPairingException.UserDeniedPairing
                     "PasswordProtected" -> throw LockdownPairingException.PasswordProtected
                     else -> throw LockdownPairingException.RemoteError(error)
                 }
             }
+            if (pending) {
+                Log.i(TAG, "lockdown trust pending; reconnecting before retry")
+                waitForRetry(deadline, isCancelled)
+            }
         }
+    }
+
+    private fun generatePairRecord(
+        channel: LockdownPlistChannel,
+        label: String,
+        hostId: String,
+        systemBuid: String,
+        deadline: Deadline,
+        isCancelled: () -> Boolean,
+    ): LockdownPairRecord {
+        val devicePublicKey = getValue(channel, label, "DevicePublicKey", deadline, isCancelled)
+            as? LockdownPlistValue.Data
+            ?: throw LockdownPairingException.InvalidResponse("DevicePublicKey was not data")
+        val wifiAddress = getValue(channel, label, "WiFiAddress", deadline, isCancelled)
+            as? LockdownPlistValue.Text
+            ?: throw LockdownPairingException.InvalidResponse("WiFiAddress was not text")
+        return LockdownPairRecordGenerator.generate(
+            devicePublicKeyPkcs1Pem = devicePublicKey.bytes,
+            wifiAddress = wifiAddress.value,
+            hostId = hostId,
+            systemBuid = systemBuid,
+        )
+    }
+
+    private fun pairRequest(
+        label: String,
+        pairRecord: LockdownPairRecord,
+    ): LockdownPlistValue.Dictionary = LockdownPlistValue.Dictionary(
+        linkedMapOf(
+            "Label" to LockdownPlistValue.Text(label),
+            "PairRecord" to pairRecord.toPairRequestDictionary(),
+            "Request" to LockdownPlistValue.Text("Pair"),
+            "ProtocolVersion" to LockdownPlistValue.Text("2"),
+            "PairingOptions" to LockdownPlistValue.Dictionary(
+                linkedMapOf("ExtendedPairingErrors" to LockdownPlistValue.Boolean(true)),
+            ),
+        ),
+    )
+
+    private fun setUntrustedHostBuid(
+        channel: LockdownPlistChannel,
+        label: String,
+        systemBuid: String,
+        deadline: Deadline,
+        isCancelled: () -> Boolean,
+    ) {
+        checkCancelled(isCancelled)
+        val response = channel.request(
+            LockdownPlistValue.Dictionary(
+                linkedMapOf(
+                    "Label" to LockdownPlistValue.Text(label),
+                    "Request" to LockdownPlistValue.Text("SetValue"),
+                    "Key" to LockdownPlistValue.Text("UntrustedHostBUID"),
+                    "Value" to LockdownPlistValue.Text(systemBuid),
+                ),
+            ),
+            stepTimeoutMillis(deadline),
+        )
+        checkCancelled(isCancelled)
+        response.errorCodeOrNull()?.let { throw LockdownPairingException.RemoteError(it) }
+        Log.i(TAG, "lockdown UntrustedHostBUID set")
     }
 
     private fun getValue(
@@ -157,6 +218,7 @@ class LockdownPairingClient(
     }
 
     private companion object {
+        const val TAG = "xcertplay-usb"
         const val RETRY_INTERVAL_MILLIS = 1_000L
         const val RETRY_CHECK_MILLIS = 100L
         const val NANOS_PER_MILLISECOND = 1_000_000L

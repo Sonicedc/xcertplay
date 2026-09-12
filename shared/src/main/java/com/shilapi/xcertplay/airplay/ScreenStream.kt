@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.airplay
 
+import android.util.Log
 import java.io.Closeable
 import java.io.InputStream
 import java.net.InetAddress
@@ -27,6 +28,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
 
     private val closed = AtomicBoolean(false)
     private val frameCounter = AtomicLong(0)
+    private val firstFrameLogged = AtomicBoolean(false)
     private var server: ServerSocket? = null
     private var socket: Socket? = null
     private var thread: Thread? = null
@@ -90,10 +92,18 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                 } else {
                     body
                 }
+                if (firstFrameLogged.compareAndSet(false, true)) {
+                    Log.i(
+                        TAG,
+                        "video first decrypted frame sealed=${body.size} plain=${payload.size} " +
+                            "head=${payload.hexPrefix(16)}",
+                    )
+                }
                 listener.onFrame(payload)
             }
             OP_VIDEO_CONFIG -> {
                 val (codec, codecData) = ScreenCodec.detectConfig(body)
+                Log.i(TAG, "video codec config codec=$codec body=${body.size} data=${codecData.size}")
                 listener.onCodec(codec)
                 listener.onConfig(codecData)
             }
@@ -113,6 +123,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
     }
 
     private companion object {
+        const val TAG = "xcertplay-usb"
         const val HEADER_LEN = 128
         const val OPCODE_OFFSET = 4
         const val OP_VIDEO_FRAME = 0
@@ -120,6 +131,9 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         const val MAX_BODY = 8 * 1024 * 1024
     }
 }
+
+private fun ByteArray.hexPrefix(length: Int): String =
+    take(length).joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 /** Extracts the avcC/hvcC codec-data record from a VideoConfig payload. */
 object ScreenCodec {

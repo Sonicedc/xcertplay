@@ -46,9 +46,9 @@ import java.util.Locale
 class CarPlayHostActivity : ComponentActivity() {
     private val airPlayConfig = AirPlayConfig(
         deviceName = "xcertplay",
-        deviceId = "xcertplay-device",
+        deviceId = "02:00:00:00:00:02",
         btMac = "02:00:00:00:00:01",
-        sourceVersion = "1.0.0",
+        sourceVersion = "950.7.1",
         main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
     )
     private lateinit var airPlayIdentity: AirPlayIdentity
@@ -59,11 +59,12 @@ class CarPlayHostActivity : ComponentActivity() {
         serialNumber = "xcertplay",
         firmwareVersion = "1.0.0",
         hardwareVersion = "1.0",
-        carPlayUsbInterfaceNumber = 1,
+        carPlayUsbInterfaceNumber = 3,
     )
     // CH341 USB\VID_1A86&PID_5512&REV_0304 is the deployment-supplied bridge identity.
     private val runtimeConfig: CarPlayRuntimeConfig = CarPlayRuntimeConfig(
         ch341Devices = listOf(UsbDeviceId(0x1a86, 0x5512)),
+        ch341MfiResetGpio = 0, // CH341 D0/CS0 -> open-drain MFi RST
         identification = identification,
     )
 
@@ -90,7 +91,11 @@ class CarPlayHostActivity : ComponentActivity() {
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
 
         override fun surfaceDestroyed(holder: SurfaceHolder) {
-            if (currentSurface === holder.surface) currentSurface = null
+            if (currentSurface === holder.surface) {
+                currentSurface = null
+                sink?.clearSurface(SCREEN_TYPE_MAIN, holder.surface)
+                sink?.clearSurface(SCREEN_TYPE_ALT, holder.surface)
+            }
             appendLog("Surface destroyed")
         }
     }
@@ -182,7 +187,11 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun startCarPlay() {
         val config = runtimeConfig
         appendLog("Starting CarPlay controller")
-        val renderer = AndroidMediaSink(null)
+        val renderer = AndroidMediaSink(
+            surface = null,
+            videoWidth = airPlayConfig.main.widthPixels,
+            videoHeight = airPlayConfig.main.heightPixels,
+        )
         sink = renderer
         currentSurface?.let(::attachSurface)
         val media = CarPlayMediaEngine(renderer)
@@ -199,6 +208,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 override fun onSessionActive(session: AirPlaySession) {
                     runOnUiThread {
                         appendLog("AirPlay session active")
+                        statusView?.visibility = View.GONE
                         reconnectButtons?.visibility = View.GONE
                     }
                 }
@@ -206,6 +216,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 override fun onSessionEnded(session: AirPlaySession) {
                     runOnUiThread {
                         appendLog("AirPlay session ended")
+                        statusView?.visibility = View.VISIBLE
                         reconnectButtons?.visibility = View.VISIBLE
                     }
                 }
@@ -231,7 +242,10 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun setStatus(message: String) {
-        appendLog(message)
+        runOnUiThread {
+            statusView?.visibility = View.VISIBLE
+            appendLog(message)
+        }
     }
 
     private fun appendLog(message: String) {

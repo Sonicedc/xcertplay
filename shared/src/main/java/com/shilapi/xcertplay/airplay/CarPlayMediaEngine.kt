@@ -1,6 +1,8 @@
 package com.shilapi.xcertplay.airplay
 
+import android.util.Log
 import java.io.Closeable
+import java.math.BigInteger
 import java.util.concurrent.ConcurrentHashMap
 
 /** Rendering seam for the decrypted CarPlay media streams. */
@@ -36,6 +38,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
 
     override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int? {
         val key = outputKey(session, stream) ?: return null
+        Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
         val screen = ScreenStream(key)
         val port = screen.listen(
             object : ScreenStream.Listener {
@@ -77,7 +80,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
             "type" to type,
             "dataPort" to dataPort,
             "controlPort" to controlPort,
-            "streamConnectionID" to (connectionId ?: 0L),
+            "streamConnectionID" to unsignedPlistInteger(connectionId ?: 0L),
         )
     }
 
@@ -85,7 +88,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
         val uuid = (stream["clientTypeUUID"] as? String)?.uppercase() ?: return null
         if (uuid != IAP_DATASTREAM_UUID) return null
         val shared = session.sharedSecret ?: return null
-        val seed = stream["seed"] ?: return null
+        val seed = unsignedPlistDecimal(stream["seed"]) ?: return null
         val key = AirPlayCrypto.hkdfSha512(
             shared,
             "DataStream-Salt$seed".toByteArray(Charsets.US_ASCII),
@@ -119,7 +122,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
                 val firstUnsigned = firstSample.toLong() and 0xffff_ffffL
                 val sampleTime = (firstUnsigned + Math.round(elapsedSec * meta.format.sampleRate)) and
                     0xffff_ffffL
-                entry["streamConnectionID"] = meta.connectionId ?: 0L
+                entry["streamConnectionID"] = unsignedPlistInteger(meta.connectionId ?: 0L)
                 entry["timestamp"] = session.syncedNtp()
                 entry["timestampRawNs"] = nowNs
                 entry["sampleTime"] = sampleTime
@@ -135,7 +138,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
 
     private fun outputKey(session: AirPlaySession, stream: Map<String, Any?>): ByteArray? {
         val shared = session.sharedSecret ?: return null
-        val connectionId = stream["streamConnectionID"] ?: return null
+        val connectionId = unsignedPlistDecimal(stream["streamConnectionID"]) ?: return null
         return AirPlayCrypto.hkdfSha512(
             shared,
             "DataStream-Salt$connectionId".toByteArray(Charsets.US_ASCII),
@@ -145,8 +148,24 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
     }
 
     private companion object {
+        const val TAG = "xcertplay-usb"
         const val STREAM_TYPE_DATA = 130
         const val DATASTREAM_OUTPUT_KEY = "DataStream-Output-Encryption-Key"
         const val IAP_DATASTREAM_UUID = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2"
     }
+}
+
+internal fun unsignedPlistDecimal(value: Any?): String? = when (value) {
+    is Long -> java.lang.Long.toUnsignedString(value)
+    is Int -> Integer.toUnsignedString(value)
+    is Short -> (value.toInt() and 0xffff).toString()
+    is Byte -> (value.toInt() and 0xff).toString()
+    is BigInteger -> if (value.signum() >= 0) value.toString() else null
+    else -> (value as? Number)?.toLong()?.let(java.lang.Long::toUnsignedString)
+}
+
+internal fun unsignedPlistInteger(value: Any?): Any = when (value) {
+    is Long -> if (value < 0) BigInteger(java.lang.Long.toUnsignedString(value)) else value
+    is Int -> if (value < 0) BigInteger(Integer.toUnsignedString(value)) else value
+    else -> value ?: 0L
 }
