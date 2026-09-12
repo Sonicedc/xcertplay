@@ -36,6 +36,11 @@ object BplistCodec {
             nodes.add(Leaf(ByteArray(0)))
             when (value) {
                 is Boolean -> nodes[index] = Leaf(byteArrayOf(if (value) 0x09 else 0x08))
+                is java.math.BigInteger -> {
+                    require(value.signum() >= 0) { "bplist: negative integers are not supported" }
+                    require(value.bitLength() <= 64) { "bplist: integer exceeds 64 bits" }
+                    nodes[index] = Leaf(encodeUnsignedInt(value))
+                }
                 is Byte, is Short, is Int, is Long -> {
                     val number = (value as Number).toLong()
                     nodes[index] = if (number >= 0) {
@@ -199,6 +204,23 @@ object BplistCodec {
             else -> 0
         }
         return byteArrayOf((0x10 or log).toByte()) + bigEndian(number, size)
+    }
+
+    private fun encodeUnsignedInt(number: java.math.BigInteger): ByteArray {
+        val size = when {
+            number.bitLength() > 32 -> 8
+            number.bitLength() > 16 -> 4
+            number.bitLength() > 8 -> 2
+            else -> 1
+        }
+        val log = when (size) {
+            8 -> 3
+            4 -> 2
+            2 -> 1
+            else -> 0
+        }
+        val raw = number.toByteArray()
+        return byteArrayOf((0x10 or log).toByte()) + raw.copyOfRange(raw.size - size, raw.size)
     }
 
     private fun marker(type: Int, count: Int): ByteArray {

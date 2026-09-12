@@ -117,7 +117,6 @@ class CarPlayVpnService : VpnService() {
                 val socket: Socket = server.accept()
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
-                protect(socket)
                 val session = AirPlaySession(
                     socket = socket,
                     config = config,
@@ -131,7 +130,6 @@ class CarPlayVpnService : VpnService() {
                         }
                     },
                     media = media,
-                    protectSocket = { protect(it) },
                 )
                 addSession(session)
                 session.start()

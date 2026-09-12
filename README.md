@@ -171,6 +171,18 @@ wire format, the `/info` capability declaration, and the touch/knob/media/teleph
 descriptors and reports. `AirPlaySession` owns one TCP control connection, routes pairing,
 `/auth-setup`, `/info`, SETUP, RECORD, TEARDOWN, `/command`, and `/feedback`, and opens the
 encrypted event channel used to push HID input to the phone. Screen and audio stream setup is
-routed through `AirPlayMediaHandler`; media decode and NTP timing are still deferred.
+routed through `AirPlayMediaHandler`.
+
+This has not been verified against an iPhone or vehicle head unit.
+
+## AirPlay media/NTP status
+
+`CarPlayMediaEngine` is the concrete `AirPlayMediaHandler`: it binds the screen, audio, and
+iAP2 DataStream ports and decrypts their payloads. `ScreenStream` frames the 128-byte
+AirPlayScreenHeader and extracts avcC/hvcC config, and `IapTunnel` reassembles the
+iAP2-over-CarPlay stream. `NtpClock` performs the CarPlay timing exchange, and `AirPlaySession`
+opens the optional keep-alive port. Decoded media is delivered to the `MediaSink` interface;
+audio transport is intentionally unhandled until a grounded reference implementation exists,
+and Android MediaCodec/AudioTrack rendering plus SurfaceView touch input remain integration seams.
 
 This has not been verified against an iPhone or vehicle head unit.

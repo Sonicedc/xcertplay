@@ -462,13 +462,13 @@ to preserve the curated test count.
   Touch/knob/media/telephony/Siri/night-mode commands are sent over the event channel.
 - `CarPlayVpnService` owns the Android VPN tun, bridges it to the iPhone NCM Ethernet link through
   `Ipv6NcmBridge`, and binds the AirPlay listener to the link-local IPv6 address on `config.port`.
-  It protects the listener socket from the VPN route and reuses `AirPlaySession` for each accepted
-  socket.
+  CarPlay sockets intentionally remain subject to the VPN route and it reuses `AirPlaySession` for
+  each accepted socket.
 
-Media decode/render (screen and audio) remains a seam behind `AirPlayMediaHandler`; NTP timing is
-still a placeholder that holds the timing connection, `POST /feedback` currently returns an empty
-200 ack, and the optional keep-alive port is not opened. The wired iAP2 control path, the VPN/NCM
-bridge, and this AirPlay session have not been verified against an iPhone or vehicle head unit.
+Media rendering remains a `MediaSink` seam, but the stream transport, decryption, NTP clock,
+`/feedback` media-clock response, and keep-alive port are implemented in Stage 8G below. The wired
+iAP2 control path, the VPN/NCM bridge, and this AirPlay session have not been verified against an
+iPhone or vehicle head unit.
 
 ### Build and unit tests
 
@@ -482,3 +482,40 @@ $env:OS = "Windows_NT"
 
 `shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary bplist/info round-trip
 test passed and was removed to preserve the curated test count.
+
+## Stage 8G: AirPlay media transport and NTP (code complete, hardware unverified)
+
+- `NtpClock` drives the CarPlay timing-port exchange over UDP: it sends PT_REQUEST (210), answers
+  the phone's PT_REQUEST, and steers a local monotonic clock from PT_RESPONSE (211) samples using
+  the LIVI step/slew, lowest-RTT pick, and delay-window logic. `AirPlaySession` starts it against
+  the phone's SETUP `timingPort` and exposes `syncedNtp()` to the media layer.
+- `ScreenStream` receives one TCP video stream, frames the 128-byte AirPlayScreenHeader, decrypts
+  VideoFrame with the DataStream output key and per-frame nonce, and extracts avcC/hvcC codec
+  config from VideoConfig. `CarPlayMediaEngine` binds the screen/audio/data ports and owns their
+  lifetime.
+- `IapTunnel` receives the iAP2-over-CarPlay DataStream (type 130): NetSocketChaCha20Poly1305
+  stream framing followed by APTransportPackage records, emitting `comm` iAP2 bodies.
+- `AirPlaySession` opens the optional `keepAlivePort` when the phone requests low-power keep-alive.
+
+The LIVI audio receiver is a native component absent from this reference checkout, so the audio
+wire format is deliberately not inferred or invented here: audio SETUP and `POST /feedback`
+anchors remain unhandled until a grounded implementation exists. `NtpClock` supplies an
+unsigned-NTP64 clock for that future feedback path.
+
+Decoded media is delivered to the `MediaSink` callback interface. Android MediaCodec/AudioTrack
+rendering, the SurfaceView touch path, and USB bring-up orchestration remain outside this stage and
+have not been verified on hardware.
+
+### Build and unit tests
+
+2026-09-12 verified with Android Studio JBR 25 offline:
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+$env:OS = "Windows_NT"
+.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
+```
+
+`shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary JVM test exercising the
+LIVI audio RTP layout, screen frame header AAD, avcC/hvcC config detection, audio-format mapping,
+and NTP clock initialization passed and was then removed to preserve the curated test count.

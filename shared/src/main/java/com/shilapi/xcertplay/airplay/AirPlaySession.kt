@@ -4,7 +4,11 @@ import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
+import java.math.BigInteger
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
@@ -31,6 +35,7 @@ interface AirPlayMediaHandler {
     fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int? = null
     fun onAudio(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Map<String, Any?>? = null
     fun onDataStream(session: AirPlaySession, stream: Map<String, Any?>): Map<String, Any?>? = null
+    fun onFeedback(session: AirPlaySession): Map<String, Any?>? = null
     fun onTeardown(session: AirPlaySession, type: Int) {}
 }
 
@@ -38,7 +43,7 @@ interface AirPlayMediaHandler {
  * One CarPlay AirPlay control connection.
  *
  * It owns the RTSP framing, pairing/auth/info routing, the encrypted event channel used for HID
- * input, and stream SETUP/TEARDOWN routing. Media decode and NTP timing remain outside this layer.
+ * input, stream SETUP/TEARDOWN routing, the NTP timing exchange, and the keep-alive socket.
  */
 class AirPlaySession(
     private val socket: Socket,
@@ -48,7 +53,6 @@ class AirPlaySession(
     private val mfi: MfiAuthenticationClient?,
     private val listener: AirPlaySessionListener,
     private val media: AirPlayMediaHandler,
-    private val protectSocket: (Socket) -> Boolean = { true },
 ) : Closeable {
     internal val pairSetup = PairSetup(identity, pairings)
     internal val pairVerify = PairVerify(identity, pairings)
@@ -63,13 +67,18 @@ class AirPlaySession(
     private var eventSocket: Socket? = null
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
-    private var timing: TimingSync? = null
+    private val ntp = NtpClock()
+    private var keepAliveSocket: DatagramSocket? = null
+    private var keepAliveThread: Thread? = null
     private val eventWriteLock = Any()
     private val eventThreads = CopyOnWriteArrayList<Thread>()
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
+    private val peerAddress: InetAddress? = socket.inetAddress
     val controllerId: String? get() = pairVerify.verifiedControllerId
     val sharedSecret: ByteArray? get() = pairVerify.shared?.copyOf()
+
+    fun syncedNtp(): BigInteger = ntp.syncedNtp()
 
     fun start() {
         Thread(::runControl, "airplay-control").apply {
@@ -219,7 +228,17 @@ class AirPlaySession(
                 body = BplistCodec.encode(AirPlayInfoPlist.build(config)),
             )
             request.method == "POST" && path.endsWith("/command") -> handleCommand(request)
-            request.method == "POST" && path.endsWith("/feedback") -> RtspMessage.Response(status = 200)
+            request.method == "POST" && path.endsWith("/feedback") -> {
+                val body = media.onFeedback(this)
+                if (body == null) {
+                    RtspMessage.Response(status = 200)
+                } else {
+                    RtspMessage.Response(
+                        headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
+                        body = BplistCodec.encode(body),
+                    )
+                }
+            }
             else -> RtspMessage.Response(status = 200)
         }
     }
@@ -245,10 +264,14 @@ class AirPlaySession(
             listener.onDeviceInfo(this, AirPlayDeviceInfo(name, deviceId, wifiMac, model))
         }
 
+        val peerTimingPort = long(dict["timingPort"])?.toInt() ?: 0
         val response = linkedMapOf<String, Any?>(
-            "timingPort" to openTiming(),
+            "timingPort" to openTiming(peerTimingPort),
             "eventPort" to openEvent(),
         )
+        if (dict["keepAliveLowPower"] == true || dict["keepAliveLowPower"] == 1L) {
+            response["keepAlivePort"] = openKeepAlive()
+        }
         val features = mutableListOf<String>()
         if (config.hevc) features.add("hevc")
         features.add("iAPChannel")
@@ -325,10 +348,33 @@ class AirPlaySession(
         return RtspMessage.Response(status = 200)
     }
 
-    private fun openTiming(): Int {
-        val sync = TimingSync(protectSocket)
-        timing = sync
-        return sync.listen()
+    private fun openTiming(peerPort: Int): Int {
+        val port = ntp.listen()
+        if (peerPort > 0) peerAddress?.let { ntp.start(it, peerPort) }
+        return port
+    }
+
+    private fun openKeepAlive(): Int {
+        val socket = DatagramSocket(null)
+        socket.reuseAddress = true
+        socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
+        keepAliveSocket = socket
+        keepAliveThread = Thread({ runKeepAlive(socket) }, "airplay-keepalive").apply {
+            isDaemon = true
+            start()
+        }
+        return socket.localPort
+    }
+
+    private fun runKeepAlive(socket: DatagramSocket) {
+        val buffer = ByteArray(512)
+        while (!closed.get()) {
+            try {
+                socket.receive(DatagramPacket(buffer, buffer.size))
+            } catch (_: Exception) {
+                if (closed.get()) return
+            }
+        }
     }
 
     private fun openEvent(): Int {
@@ -339,8 +385,11 @@ class AirPlaySession(
     }
 
     private fun teardown() {
-        timing?.close()
-        timing = null
+        ntp.close()
+        safeClose(keepAliveSocket)
+        keepAliveSocket = null
+        keepAliveThread?.interrupt()
+        keepAliveThread = null
         safeClose(eventServer)
         eventServer = null
         safeClose(eventSocket)
@@ -354,7 +403,6 @@ class AirPlaySession(
         try {
             val socket = server.accept()
             eventSocket = socket
-            protectSocket(socket)
             val shared = pairVerify.shared
             if (shared == null) {
                 safeClose(socket)
@@ -437,40 +485,6 @@ class AirPlaySession(
         const val STREAM_TYPE_DATA = 130
 
         const val READ_CHUNK_BYTES = 16 * 1024
-    }
-}
-
-internal class TimingSync(private val protectSocket: (Socket) -> Boolean) {
-    private var server: ServerSocket? = null
-    private var socket: Socket? = null
-    private var thread: Thread? = null
-
-    fun listen(): Int {
-        val bound = ServerSocket(0, 50, InetAddress.getByName("::"))
-        server = bound
-        thread = Thread({ accept(bound) }, "airplay-timing").apply { isDaemon = true; start() }
-        return bound.localPort
-    }
-
-    private fun accept(bound: ServerSocket) {
-        try {
-            val accepted = bound.accept()
-            socket = accepted
-            protectSocket(accepted)
-            val input = BufferedInputStream(accepted.getInputStream())
-            val buffer = ByteArray(1024)
-            while (input.read(buffer) >= 0) {
-                // NTP timing sync is implemented by the media layer; hold the connection open.
-            }
-        } catch (_: Exception) {
-            // Listener closed during session teardown.
-        }
-    }
-
-    fun close() {
-        safeClose(socket)
-        safeClose(server)
-        thread?.interrupt()
     }
 }
 
