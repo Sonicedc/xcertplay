@@ -11,6 +11,7 @@ import android.view.Surface
 import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.AudioFormat
 import com.shilapi.xcertplay.airplay.MediaSink
+import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.VideoCodec
 import java.io.Closeable
 import java.nio.ByteBuffer
@@ -32,6 +33,7 @@ class AndroidMediaSink(
     private val surfaces = ConcurrentHashMap<Int, Surface>()
     private val videoDecoders = ConcurrentHashMap<Int, VideoDecoder>()
     private val audioRenderers = ConcurrentHashMap<Int, AudioRenderer>()
+    private val microphoneUplinks = ConcurrentHashMap<Int, MicrophoneUplink>()
     private val pendingVideoCodec = ConcurrentHashMap<Int, VideoCodec>()
 
     fun setSurface(type: Int, surface: Surface) {
@@ -64,11 +66,26 @@ class AndroidMediaSink(
         audioRenderer(type, format).submit(rtp)
     }
 
+    override fun onAudioStopped(type: Int) {
+        audioRenderers.remove(type)?.close()
+    }
+
+    override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
+        val uplink = microphoneUplinks.computeIfAbsent(type) { MicrophoneUplink(config) }
+        if (!uplink.start()) microphoneUplinks.remove(type, uplink)
+    }
+
+    override fun onMicrophoneStopped(type: Int) {
+        microphoneUplinks.remove(type)?.close()
+    }
+
     fun close() {
         videoDecoders.values.forEach(VideoDecoder::close)
         videoDecoders.clear()
         audioRenderers.values.forEach(AudioRenderer::close)
         audioRenderers.clear()
+        microphoneUplinks.values.forEach(MicrophoneUplink::close)
+        microphoneUplinks.clear()
     }
 
     private fun videoDecoder(type: Int): VideoDecoder =
@@ -81,8 +98,13 @@ class AndroidMediaSink(
             )
         }
 
-    private fun audioRenderer(type: Int, format: AudioFormat): AudioRenderer =
-        audioRenderers.computeIfAbsent(type) { AudioRenderer(format) }
+    @Synchronized
+    private fun audioRenderer(type: Int, format: AudioFormat): AudioRenderer {
+        val existing = audioRenderers[type]
+        if (existing?.format == format) return existing
+        existing?.close()
+        return AudioRenderer(format).also { audioRenderers[type] = it }
+    }
 }
 
 private sealed interface VideoJob {
@@ -310,13 +332,18 @@ private fun MediaFormat.intOrNull(key: String): Int? =
     }
 
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
-private class AudioRenderer(private val format: AudioFormat) : Closeable {
-    private val queue = LinkedBlockingQueue<ByteArray>()
+private class AudioRenderer(val format: AudioFormat) : Closeable {
+    private val queue = LinkedBlockingQueue<ByteArray>(MAX_QUEUED_PACKETS)
     @Volatile private var running = true
     @Volatile private var started = false
     private var codec: MediaCodec? = null
     private var track: AudioTrack? = null
     private var pcm = ByteArray(64 * 1024)
+    private var playbackStarted = false
+    private var prebufferBytes = 0
+    private var startThresholdBytes = 0
+    private var fadeApplied = false
+    private var droppedPacketsLogged = false
     private val thread = Thread(::run, "carplay-audio").apply { isDaemon = true }
 
     fun start() {
@@ -326,7 +353,12 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
     }
 
     fun submit(rtp: ByteArray) {
-        if (started) queue.offer(rtp)
+        if (!started || !queue.offer(rtp)) {
+            if (started && !droppedPacketsLogged) {
+                droppedPacketsLogged = true
+                Log.w(TAG, "audio queue full; dropping newest packets to bound latency")
+            }
+        }
     }
 
     override fun close() {
@@ -336,7 +368,11 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
 
     private fun run() {
         try {
-            if (format.codec == AudioCodecKind.AAC_LC) configureCodec()
+            when (format.codec) {
+                AudioCodecKind.AAC_LC -> configureCodec(MediaFormat.MIMETYPE_AUDIO_AAC)
+                AudioCodecKind.OPUS -> configureCodec(MediaFormat.MIMETYPE_AUDIO_OPUS)
+                AudioCodecKind.LPCM -> Unit
+            }
             createTrack()
             while (running) handle(queue.take())
         } catch (_: InterruptedException) {
@@ -348,16 +384,20 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
         }
     }
 
-    private fun configureCodec() {
+    private fun configureCodec(mime: String) {
         val mediaFormat = MediaFormat().apply {
-            setString(MediaFormat.KEY_MIME, MediaFormat.MIMETYPE_AUDIO_AAC)
+            setString(MediaFormat.KEY_MIME, mime)
             setInteger(MediaFormat.KEY_SAMPLE_RATE, format.sampleRate)
             setInteger(MediaFormat.KEY_CHANNEL_COUNT, format.channels)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
-            setInteger(MediaFormat.KEY_IS_ADTS, 1)
+            if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
+                setInteger(MediaFormat.KEY_IS_ADTS, 1)
+            } else {
+                setByteBuffer("csd-0", ByteBuffer.wrap(opusHead()))
+            }
         }
         codec = try {
-            MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).also {
+            MediaCodec.createDecoderByType(mime).also {
                 it.configure(mediaFormat, null, null, 0)
                 it.start()
             }
@@ -371,13 +411,18 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
         val channelMask = if (format.channels >= 2) AndroidAudioFormat.CHANNEL_OUT_STEREO
         else AndroidAudioFormat.CHANNEL_OUT_MONO
         val minBuffer = AudioTrack.getMinBufferSize(format.sampleRate, channelMask, encoding)
+        if (minBuffer <= 0) {
+            Log.e(TAG, "AudioTrack buffer size unavailable rate=${format.sampleRate} channels=${format.channels}")
+            return
+        }
+        val bufferBytes = maxOf(minBuffer * 4, MIN_TRACK_BUFFER_BYTES)
+        startThresholdBytes = if (format.audioType == "telephony" || format.audioType == "speechrecognition") {
+            maxOf(minBuffer, MIN_START_BUFFER_BYTES)
+        } else {
+            maxOf(minBuffer, MIN_START_BUFFER_BYTES)
+        }
         track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build(),
-            )
+            .setAudioAttributes(audioAttributes())
             .setAudioFormat(
                 AndroidAudioFormat.Builder()
                     .setEncoding(encoding)
@@ -385,10 +430,66 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
                     .setChannelMask(channelMask)
                     .build(),
             )
-            .setBufferSizeInBytes(maxOf(minBuffer * 2, 8192))
+            .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        track?.play()
+        Log.i(
+            TAG,
+            "audio track prepared type=${format.payloadType} audioType=${format.audioType} " +
+                "codec=${format.codec} " +
+                "rate=${format.sampleRate} channels=${format.channels}",
+        )
+    }
+
+    private fun audioAttributes(): AudioAttributes {
+        val usage: Int
+        val contentType: Int
+        when {
+            format.audioType == "telephony" || format.audioType == "speechrecognition" -> {
+                usage = AudioAttributes.USAGE_VOICE_COMMUNICATION
+                contentType = AudioAttributes.CONTENT_TYPE_SPEECH
+            }
+            format.payloadType == STREAM_TYPE_MAIN_HIGH_AUDIO -> {
+                usage = AudioAttributes.USAGE_NOTIFICATION
+                contentType = AudioAttributes.CONTENT_TYPE_SONIFICATION
+            }
+            format.audioType == "default" ||
+                format.audioType == "alert" ||
+                format.audioType == "compatibility" -> {
+                usage = AudioAttributes.USAGE_NOTIFICATION_RINGTONE
+                contentType = AudioAttributes.CONTENT_TYPE_SONIFICATION
+            }
+            else -> {
+                usage = AudioAttributes.USAGE_MEDIA
+                contentType = AudioAttributes.CONTENT_TYPE_MUSIC
+            }
+        }
+        return AudioAttributes.Builder()
+            .setUsage(usage)
+            .setContentType(contentType)
+            .build()
+            .also {
+                Log.i(
+                    TAG,
+                    "audio route type=${format.payloadType} audioType=${format.audioType} " +
+                        "usage=$usage contentType=$contentType",
+                )
+            }
+    }
+
+    /** Minimal OpusHead CSD for the mono 48 kHz stream CarPlay negotiates. */
+    private fun opusHead(): ByteArray {
+        val head = ByteArray(19)
+        "OpusHead".toByteArray(Charsets.US_ASCII).copyInto(head, 0)
+        head[8] = 1
+        head[9] = format.channels.toByte()
+        head[10] = 0x38
+        head[11] = 0x01
+        head[12] = format.sampleRate.toByte()
+        head[13] = (format.sampleRate ushr 8).toByte()
+        head[14] = (format.sampleRate ushr 16).toByte()
+        head[15] = (format.sampleRate ushr 24).toByte()
+        return head
     }
 
     private fun handle(rtp: ByteArray) {
@@ -402,7 +503,10 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
                     )
                 }
             }
-            AudioCodecKind.OPUS -> Unit
+            AudioCodecKind.OPUS -> {
+                val accessUnit = rtp.copyOfRange(12, rtp.size)
+                if (accessUnit.isNotEmpty()) feedCodec(accessUnit)
+            }
         }
     }
 
@@ -449,12 +553,41 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
     }
 
     private fun writePcm(data: ByteArray, offset: Int = 0, length: Int = data.size) {
+        val track = track ?: return
+        if (!fadeApplied) {
+            applyFadeIn(data, offset, length)
+            fadeApplied = true
+        }
         var written = 0
         while (written < length && running) {
-            val count = track?.write(data, offset + written, length - written, AudioTrack.WRITE_BLOCKING)
-                ?: -1
+            val writeLength = if (playbackStarted) {
+                length - written
+            } else {
+                minOf(length - written, PREBUFFER_WRITE_CHUNK_BYTES)
+            }
+            val count = track.write(data, offset + written, writeLength, AudioTrack.WRITE_BLOCKING)
             if (count <= 0) break
             written += count
+            if (!playbackStarted) {
+                prebufferBytes += count
+                if (prebufferBytes >= startThresholdBytes) {
+                    track.play()
+                    playbackStarted = true
+                    Log.i(TAG, "audio playback started type=${format.payloadType}")
+                }
+            }
+        }
+    }
+
+    private fun applyFadeIn(data: ByteArray, offset: Int, length: Int) {
+        val samples = (length - length % 2) / 2
+        val fadeSamples = minOf(samples, maxOf(1, format.sampleRate / 100))
+        for (index in 0 until fadeSamples) {
+            val position = offset + index * 2
+            val sample = (data[position].toInt() and 0xff) or (data[position + 1].toInt() shl 8)
+            val scaled = (sample.toLong() * (index + 1) / fadeSamples).toInt()
+            data[position] = scaled.toByte()
+            data[position + 1] = (scaled shr 8).toByte()
         }
     }
 
@@ -487,7 +620,12 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
         this.track = null
         if (track != null) {
             try {
-                track.stop()
+                track.pause()
+            } catch (_: Exception) {
+                // Best effort.
+            }
+            try {
+                track.flush()
             } catch (_: Exception) {
                 // Best effort.
             }
@@ -502,5 +640,10 @@ private class AudioRenderer(private val format: AudioFormat) : Closeable {
     private companion object {
         const val TAG = "xcertplay-usb"
         const val INPUT_TIMEOUT_US = 10_000L
+        const val MAX_QUEUED_PACKETS = 64
+        const val MIN_TRACK_BUFFER_BYTES = 16 * 1024
+        const val MIN_START_BUFFER_BYTES = 4 * 1024
+        const val PREBUFFER_WRITE_CHUNK_BYTES = 2 * 1024
+        const val STREAM_TYPE_MAIN_HIGH_AUDIO = 102
     }
 }

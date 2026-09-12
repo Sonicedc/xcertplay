@@ -193,9 +193,19 @@ This has not been verified against an iPhone or vehicle head unit.
 a caller-provided `Surface`, plus AAC-LC and LPCM playback through MediaCodec/AudioTrack.
 `MediaCodecSupport` converts avcC and hvcC records into the Annex B CSD expected by MediaCodec,
 handles Annex B framing, RFC 3640 AAC access-unit extraction
-and ADTS wrapping, and wired LPCM byte-swapping. Opus packets are skipped because Android
-MediaCodec has no built-in Opus decoder; it remains a native-decoder gap. `CarPlayTouchMapper`
+and ADTS wrapping, and wired LPCM byte-swapping. Opus playback uses Android's Opus MediaCodec
+decoder when the platform exposes one; otherwise packets are skipped. Telephony and speech
+recognition use voice-communication output; navigation/default/alert prompts use the notification
+ringtone route; media uses the music route; stream type 102 uses notification. `CarPlayTouchMapper`
 turns Android MotionEvents into CarPlay touch contacts for `AirPlaySession.sendTouch`.
+
+When `RECORD_AUDIO` is granted, the Android sink also captures PCM microphone input for
+telephony and speech-recognition streams whose SETUP request carries the phone's microphone
+`dataPort`. Samples are sealed with the derived `DataStream-Input-Encryption-Key` and sent as
+CarPlay RTP. Opus microphone encoding is not implemented, so `/info` advertises only PCM input;
+without permission, no microphone input format is advertised. Audio playback is prebuffered
+before `AudioTrack.play()`, drops newest packets when its bounded queue fills, and fades in its
+first PCM buffer to avoid start-of-stream clicks.
 
 HEVC/H.265 transport is enabled by default and can be switched off in the three-finger settings
 menu. The preference is persisted, and the next AirPlay handshake advertises `hevcInfo` plus the

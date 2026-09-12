@@ -1,6 +1,8 @@
 package com.shilapi.xcertplay
 
+import android.Manifest
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -87,6 +89,13 @@ class CarPlayHostActivity : ComponentActivity() {
                 setStatus("VPN consent was denied")
             }
         }
+    private val microphonePermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            microphoneAvailable = granted
+            microphonePermissionResolved = true
+            appendLog(if (granted) "Microphone permission granted" else "Microphone permission denied")
+            requestVpnConsent()
+        }
 
     private var videoView: TextureView? = null
     private var gestureOverlay: View? = null
@@ -103,6 +112,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var displayScaleTenths = CarPlayDisplayScale.DEFAULT_TENTHS
     private var hevcEnabled = true
     private var hevcSoftwareDecoderEnabled = false
+    private var microphoneAvailable = false
+    private var microphonePermissionResolved = false
     private var awaitingVpnConsent = false
     private var vpnReady = false
     private var userLeaving = false
@@ -176,6 +187,17 @@ class CarPlayHostActivity : ComponentActivity() {
         )
 
         appendLog("Host started; CH341 1A86:5512 configured")
+        microphoneAvailable =
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        microphonePermissionResolved = microphoneAvailable
+        if (microphonePermissionResolved) {
+            requestVpnConsent()
+        } else {
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun requestVpnConsent() {
         val consent = CarPlayVpnService.prepare(this)
         if (consent == null) {
             vpnReady = true
@@ -602,6 +624,7 @@ class CarPlayHostActivity : ComponentActivity() {
             sourceVersion = "950.7.1",
             main = display,
             hevc = hevcEnabled,
+            microphone = microphoneAvailable,
         )
     }
 
@@ -615,7 +638,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 "${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
                 "(${CarPlayDisplayScale.label(displayScaleTenths)}) " +
                 "video=${if (airPlayConfig.hevc) "HEVC" else "H.264"} " +
-                "decoder=${if (airPlayConfig.hevc && hevcSoftwareDecoderEnabled) "software" else "hardware"}",
+                "decoder=${if (airPlayConfig.hevc && hevcSoftwareDecoderEnabled) "software" else "hardware"} " +
+                "microphone=${airPlayConfig.microphone}",
         )
         Log.i(
             TAG,
@@ -623,7 +647,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 "negotiated=${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
                 "scale=${CarPlayDisplayScale.label(displayScaleTenths)} " +
                 "hevc=${airPlayConfig.hevc} " +
-                "softwareHevc=${airPlayConfig.hevc && hevcSoftwareDecoderEnabled}",
+                "softwareHevc=${airPlayConfig.hevc && hevcSoftwareDecoderEnabled} " +
+                "microphone=${airPlayConfig.microphone}",
         )
         val renderer = AndroidMediaSink(
             surface = null,
@@ -633,7 +658,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         sink = renderer
         currentSurface?.let(::attachSurface)
-        val media = CarPlayMediaEngine(renderer)
+        val media = CarPlayMediaEngine(renderer, microphoneEnabled = microphoneAvailable)
         val pairings = AirPlayPersistence.loadPairings(this) { id, key ->
             AirPlayPersistence.savePairing(this, id, key)
         }
@@ -713,6 +738,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val size = activeDisplaySize ?: return
         if (
             !vpnReady ||
+            !microphonePermissionResolved ||
             shuttingDown.get() ||
             menuOpen ||
             handshakeResetInProgress ||

@@ -47,4 +47,44 @@ class AirPlayInfoPlistTest {
         assertFalse(AirPlayInfoPlist.build(base).containsKey("hevcInfo"))
         assertTrue(AirPlayInfoPlist.build(base.copy(hevc = true)).containsKey("hevcInfo"))
     }
+
+    @Test
+    fun microphoneInputsAreAdvertisedOnlyWhenEnabled() {
+        val base = AirPlayConfig(
+            deviceName = "test",
+            deviceId = "02:00:00:00:00:02",
+            btMac = "02:00:00:00:00:02",
+            sourceVersion = "366.0",
+            main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+        )
+
+        fun telephony(info: Map<String, Any?>): Map<*, *> =
+            (info["audioFormats"] as List<*>)
+                .map { it as Map<*, *> }
+                .single { it["audioType"] == "telephony" }
+
+        assertFalse(telephony(AirPlayInfoPlist.build(base)).containsKey("audioInputFormats"))
+        assertTrue(
+            telephony(AirPlayInfoPlist.build(base.copy(microphone = true)))
+                .containsKey("audioInputFormats"),
+        )
+    }
+
+    @Test
+    fun mainAltAndHighAudioStreamsAreDeclared() {
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+            ),
+        )
+
+        val types = (info["audioFormats"] as List<*>)
+            .map { (it as Map<*, *>)["type"] }
+            .toSet()
+        assertEquals(setOf(100, 101, 102), types)
+    }
 }

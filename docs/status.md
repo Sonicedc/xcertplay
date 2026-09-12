@@ -527,14 +527,27 @@ and NTP clock initialization passed and was then removed.
   to a caller-supplied `Surface`, plus one MediaCodec/AudioTrack audio renderer per stream type.
 - `MediaCodecSupport` converts CarPlay's length-prefixed screen NALs to Annex B, converts avcC and
   hvcC records to the CSD expected by Android MediaCodec, extracts RFC 3640 AAC access units and
-  wraps them in ADTS, and byte-swaps the wired big-endian LPCM samples for AudioTrack. Opus packets
-  are skipped: Android MediaCodec has no built-in Opus decoder, so a native decoder remains a gap.
+  wraps them in ADTS, and byte-swaps the wired big-endian LPCM samples for AudioTrack. Opus
+  packets use the platform Opus MediaCodec when present and are skipped otherwise.
 - HEVC/H.265 is enabled by default, persisted in `AirPlayPersistence`, and exposed as a switch in
   the three-finger settings menu. A fresh handshake advertises `hevcInfo` and the `hevc` enabled
   feature when selected; switching the value takes effect when the settings menu closes.
 - An HEVC software-decoder switch is persisted separately, defaults to off, and selects a
   MediaCodec-listed software HEVC decoder on the next handshake. If no software decoder is
   available, decoder creation falls back to the platform default.
+- When `RECORD_AUDIO` is granted, `AndroidMediaSink` captures PCM microphone input for
+  telephony/speech-recognition streams that provide a phone `dataPort`, seals it with the
+  `DataStream-Input-Encryption-Key`, and sends the CarPlay RTP uplink. The implementation is
+  PCM-only; `/info` advertises microphone input only while permission is present.
+- The playback renderer prebuffers `AudioTrack` data before starting, applies a short PCM fade-in,
+  bounds its RTP queue, drops newest packets under sustained overload, and routes telephony
+  through voice-communication audio attributes.
+- A same-type audio SETUP with a different format closes the old stream/renderer and rebuilds
+  `AudioTrack` at the new sample rate/channel count, so a 48 kHz stereo media stream cannot
+  playback a following 16/24 kHz mono speech stream at the wrong rate.
+- Audio routing follows `audioType`: telephony/speech use voice communication, navigation and
+  alert/default prompts use the notification-ringtone route, media uses the music route, and
+  type 102 uses notification. Opus playback uses the platform MediaCodec decoder when available.
 - `CarPlayTouchMapper` normalizes Android MotionEvents into up to two `AirPlayContact`s for
   `AirPlaySession.sendTouch`.
 

@@ -78,6 +78,8 @@ class AirPlaySession(
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
     private val peerAddress: InetAddress? = socket.inetAddress
+    internal val remoteAddress: InetAddress?
+        get() = (socket.remoteSocketAddress as? InetSocketAddress)?.address
     val controllerId: String? get() = pairVerify.verifiedControllerId
     val sharedSecret: ByteArray? get() = pairVerify.shared?.copyOf()
 

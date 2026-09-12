@@ -166,6 +166,11 @@ pending a native decoder. HEVC/H.265 transport defaults to enabled, is persisted
 `AirPlayPersistence`, and can be toggled in the three-finger settings menu. The hvcC record is
 converted to Annex B VPS/SPS/PPS CSD before being handed to Android MediaCodec. A separate
 software-HEVC decoder preference defaults to off and applies on the next handshake.
+When microphone permission is granted, a PCM `AudioRecord` uplink is sealed with the DataStream
+input key and sent over CarPlay RTP for telephony/speech-recognition streams. Playback uses a
+prebuffered, bounded `AudioTrack` queue. Telephony/speech use voice communication, navigation and
+alert prompts use the notification-ringtone route, media uses the music route, and type 102 uses
+notification; Opus uses the platform decoder when available.
 
 ## Wired integration (2026-09-12)
 

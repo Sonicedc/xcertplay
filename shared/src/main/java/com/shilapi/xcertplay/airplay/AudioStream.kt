@@ -14,6 +14,7 @@ data class AudioFormat(
     val sampleRate: Int,
     val channels: Int,
     val payloadType: Int,
+    val audioType: String = "media",
 )
 
 /**
@@ -127,20 +128,21 @@ class AudioStream(private val key: ByteArray) : Closeable {
 
 /** Maps the phone's negotiated audioFormat bits to a decode/render format. */
 object AudioStreamCodec {
-    fun fromFormatBits(bits: Long, payloadType: Int): AudioFormat {
+    fun fromFormatBits(bits: Long, payloadType: Int, audioType: String = "media"): AudioFormat {
         val isAacLc = (bits and (AAC_LC_44K_STEREO or AAC_LC_48K_STEREO)) != 0L
         val isOpus = (bits and OPUS_MONO) != 0L
         val pcm = PCM_FORMAT[bits]
         return when {
-            isOpus -> AudioFormat(AudioCodecKind.OPUS, 48_000, 1, payloadType)
+            isOpus -> AudioFormat(AudioCodecKind.OPUS, 48_000, 1, payloadType, audioType)
             isAacLc -> AudioFormat(
                 AudioCodecKind.AAC_LC,
                 if ((bits and AAC_LC_48K_STEREO) != 0L) 48_000 else 44_100,
                 2,
                 payloadType,
+                audioType,
             )
-            pcm != null -> AudioFormat(AudioCodecKind.LPCM, pcm.first, pcm.second, payloadType)
-            else -> AudioFormat(AudioCodecKind.LPCM, 44_100, 2, payloadType)
+            pcm != null -> AudioFormat(AudioCodecKind.LPCM, pcm.first, pcm.second, payloadType, audioType)
+            else -> AudioFormat(AudioCodecKind.LPCM, 44_100, 2, payloadType, audioType)
         }
     }
 

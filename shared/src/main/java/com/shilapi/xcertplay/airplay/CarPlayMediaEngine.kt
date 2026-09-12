@@ -12,18 +12,21 @@ interface MediaSink {
     fun onVideoFrame(type: Int, naluBytes: ByteArray) {}
     fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {}
     fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {}
+    fun onAudioStopped(type: Int) {}
+    fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {}
+    fun onMicrophoneStopped(type: Int) {}
     fun onIapMessage(bytes: ByteArray) {}
 }
 
 /**
- * Concrete [AirPlayMediaHandler] that binds the screen and iAP2 DataStream ports, decrypts their
- * payloads, and hands decoded media to a [MediaSink].
- *
- * The LIVI audio receiver lives in a native component absent from the reference checkout, so the
- * audio wire format is intentionally not invented here; audio SETUP is left unhandled until a
- * grounded implementation exists.
+ * Concrete [AirPlayMediaHandler] that binds the screen, audio and iAP2 DataStream ports,
+ * decrypts their payloads, and hands decoded media to a [MediaSink]. Telephony and speech
+ * streams can additionally return a PCM microphone uplink through the sink.
  */
-class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
+class CarPlayMediaEngine(
+    private val sink: MediaSink,
+    private val microphoneEnabled: Boolean = false,
+) : AirPlayMediaHandler {
     private data class AudioMeta(
         val type: Int,
         val format: AudioFormat,
@@ -35,6 +38,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
 
     private val streams = ConcurrentHashMap<Int, Closeable>()
     private val audioMeta = ConcurrentHashMap<Int, AudioMeta>()
+    private val pendingMicrophone = ConcurrentHashMap<Int, MicrophoneConfig>()
 
     override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int? {
         val key = outputKey(session, stream) ?: return null
@@ -52,14 +56,29 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
     }
 
     override fun onAudio(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Map<String, Any?>? {
+        streams.remove(type)?.close()
+        audioMeta.remove(type)
+        if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
+        sink.onAudioStopped(type)
+
         val key = outputKey(session, stream) ?: return null
+        val audioType = stream["audioType"]?.toString()?.lowercase() ?: "default"
         val format = AudioStreamCodec.fromFormatBits(
             (stream["audioFormat"] as? Number)?.toLong() ?: 0L,
             type,
+            audioType,
+        )
+        Log.i(
+            TAG,
+            "airplay audio format type=$type audioType=$audioType codec=${format.codec} " +
+                "rate=${format.sampleRate} channels=${format.channels} " +
+                "micPort=${(stream["dataPort"] as? Number)?.toInt() ?: 0}",
         )
         val connectionId = stream["streamConnectionID"]
         val latencyMs = (stream["audioLatencyMs"] as? Number)?.toInt() ?: 0
         val meta = AudioMeta(type, format, connectionId, latencyMs)
+        val microphone = microphoneConfig(session, type, stream, format)
+        if (microphone != null) pendingMicrophone[type] = microphone
 
         val audio = AudioStream(key)
         val (dataPort, controlPort) = audio.listen(
@@ -68,6 +87,7 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
                     meta.firstSample = firstSample
                     meta.originNs = System.nanoTime()
                     sink.onAudioStarted(type, format, firstSample)
+                    microphone?.let { sink.onMicrophoneStarted(type, it) }
                 }
 
                 override fun onRtp(rtp: ByteArray, sample: Int) =
@@ -133,24 +153,71 @@ class CarPlayMediaEngine(private val sink: MediaSink) : AirPlayMediaHandler {
     }
 
     override fun onTeardown(session: AirPlaySession, type: Int) {
+        if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
+        audioMeta.remove(type)
+        sink.onAudioStopped(type)
         streams.remove(type)?.close()
     }
 
     private fun outputKey(session: AirPlaySession, stream: Map<String, Any?>): ByteArray? {
+        return dataStreamKey(session, stream, DATASTREAM_OUTPUT_KEY)
+    }
+
+    private fun microphoneConfig(
+        session: AirPlaySession,
+        type: Int,
+        stream: Map<String, Any?>,
+        format: AudioFormat,
+    ): MicrophoneConfig? {
+        if (!microphoneEnabled || type != STREAM_TYPE_MAIN_AUDIO) return null
+        if (format.audioType != "telephony" && format.audioType != "speechrecognition") return null
+        if (format.codec == AudioCodecKind.OPUS) {
+            Log.w(TAG, "microphone uplink does not support the negotiated Opus format")
+            return null
+        }
+        val port = (stream["dataPort"] as? Number)?.toInt() ?: return null
+        if (port !in 1..65535) return null
+        val host = session.remoteAddress ?: return null
+        val key = dataStreamKey(session, stream, DATASTREAM_INPUT_KEY) ?: return null
+        val framesPerPacket = (stream["framesPerPacket"] as? Number)?.toInt() ?: 0
+        val frameMillis = if (framesPerPacket > 0) {
+            Math.round(framesPerPacket * 1000.0 / format.sampleRate).toInt().coerceIn(5, 60)
+        } else {
+            20
+        }
+        return MicrophoneConfig(
+            audioType = format.audioType,
+            sampleRate = format.sampleRate,
+            channels = format.channels,
+            payloadType = type,
+            frameMillis = frameMillis,
+            host = host,
+            port = port,
+            key = key,
+        )
+    }
+
+    private fun dataStreamKey(
+        session: AirPlaySession,
+        stream: Map<String, Any?>,
+        label: String,
+    ): ByteArray? {
         val shared = session.sharedSecret ?: return null
         val connectionId = unsignedPlistDecimal(stream["streamConnectionID"]) ?: return null
         return AirPlayCrypto.hkdfSha512(
             shared,
             "DataStream-Salt$connectionId".toByteArray(Charsets.US_ASCII),
-            DATASTREAM_OUTPUT_KEY.toByteArray(Charsets.US_ASCII),
+            label.toByteArray(Charsets.US_ASCII),
             32,
         )
     }
 
     private companion object {
         const val TAG = "xcertplay-usb"
+        const val STREAM_TYPE_MAIN_AUDIO = 100
         const val STREAM_TYPE_DATA = 130
         const val DATASTREAM_OUTPUT_KEY = "DataStream-Output-Encryption-Key"
+        const val DATASTREAM_INPUT_KEY = "DataStream-Input-Encryption-Key"
         const val IAP_DATASTREAM_UUID = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2"
     }
 }
