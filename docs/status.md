@@ -445,3 +445,40 @@ $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 SRP client/server handshake, the full pair-setup/pair-verify round trip, the control-cipher round
 trip, and the RFC 8439 ChaCha20-Poly1305 and RFC 7748 X25519 vectors passed and was then removed
 to preserve the curated test count.
+
+## Stage 8F: AirPlay transport and session (code complete, hardware unverified)
+
+- `BplistCodec` implements the minimal `bplist00` encode/decode used on the CarPlay control
+  channel: dictionaries, arrays, ASCII/UTF-16 strings, data, non-negative integers, 32/64-bit
+  reals, and booleans. Negative integers are serialized as reals, matching the reference.
+- `AirPlayConfig` models the accessory/display/audio identity used by `/info`.
+- `AirPlayInfoPlist` builds the complete `/info` declaration: displays, view/safe areas, HID
+  devices, audio formats/latencies, resource modes, and feature bitfields.
+- `AirPlayHid` encodes the touch/knob/media/telephony descriptors and their input reports.
+- `AirPlaySession` owns one TCP control connection: plaintext pairing, then encrypted RTSP after
+  pair-verify, and routes `/pair-setup`, `/pair-verify`, `/auth-setup`, `/info`, SETUP, RECORD,
+  TEARDOWN, POST `/command`, and POST `/feedback`. Session SETUP opens the encrypted event channel
+  (Events-Salt keys) and a timing port; stream SETUP is routed through `AirPlayMediaHandler`.
+  Touch/knob/media/telephony/Siri/night-mode commands are sent over the event channel.
+- `CarPlayVpnService` owns the Android VPN tun, bridges it to the iPhone NCM Ethernet link through
+  `Ipv6NcmBridge`, and binds the AirPlay listener to the link-local IPv6 address on `config.port`.
+  It protects the listener socket from the VPN route and reuses `AirPlaySession` for each accepted
+  socket.
+
+Media decode/render (screen and audio) remains a seam behind `AirPlayMediaHandler`; NTP timing is
+still a placeholder that holds the timing connection, `POST /feedback` currently returns an empty
+200 ack, and the optional keep-alive port is not opened. The wired iAP2 control path, the VPN/NCM
+bridge, and this AirPlay session have not been verified against an iPhone or vehicle head unit.
+
+### Build and unit tests
+
+2026-09-12 verified with Android Studio JBR 25 offline:
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+$env:OS = "Windows_NT"
+.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
+```
+
+`shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary bplist/info round-trip
+test passed and was removed to preserve the curated test count.

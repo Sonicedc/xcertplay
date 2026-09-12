@@ -45,7 +45,8 @@ TLSv1.2/1.3 双工字节流。最小客户端可在会话 TLS 上发送 StartSer
 | CH341 I2C 层 | USB 控制命令、I2C stream、读写重试 | Kotlin stream 编码、每方向最多 65,535-byte 事务与 Android bulk 传输已实现；大事务 continuation/状态语义未验证 |
 | 板载 I2C 层 | JNI `I2C_RDWR` 访问 `/dev/i2c-N` | 代码已实现；受 Android SELinux 和 Unix 节点权限约束，未实机验证 |
 | USB Host 层 | CH341 与 iPhone 的发现、权限、重枚举和接口/端点管理 | iPhone USBMUX raw pipe 与最小 TCP 已实现，实机未验证 |
-| NCM 传输层 | LIVI 最小 NTB16 帧与 Android USB bulk 数据路径 | `Ntb16Codec`/`NcmFunctionDiscovery`/`NcmUsbBridge`/`EthernetIpv6Codec` 代码已实现；不创建 Android 网络接口，未实机验证 |
+| NCM 传输层 | LIVI 最小 NTB16 帧与 Android USB bulk 数据路径 | `Ntb16Codec`/`NcmFunctionDiscovery`/`NcmUsbBridge`/`EthernetIpv6Codec` 代码已实现；`CarPlayVpnService`/`Ipv6NcmBridge` 建立 VPN tun 与 NCM IPv6 桥接，未实机验证 |
+| AirPlay 会话层 | bplist、/info、RTSP 会话、配对/auth、加密事件通道、HID 输入与流 SETUP 路由 | `BplistCodec`/`AirPlayInfoPlist`/`AirPlayHid`/`AirPlaySession` 代码已实现；媒体解码与 NTP 计时仍为 seam，未实机验证 |
 | 硬件 | 车机 USB Host、CH341、MFi 芯片、供电和电平 | 未验证 |
 
 ## 建议模块边界
@@ -117,8 +118,8 @@ Lockdown Pair、StartSession、TLS、StartService 或 carkit，不解析 iAP2 �
 CarPlay 的媒体/输入数据通道在 USBMUX/iAP2 控制通道之外，由 iPhone 的 USB NCM 接口承载。当前代码
 只实现 LIVI `ntb.rs`/`ncm.rs` 使用的最小 NTB16 帧与接口发现/claim 逻辑（`Ntb16Codec`、
 `NcmFunctionDiscovery`、`NcmUsbBridge`），以及 IPv6 over Ethernet 的帧边界（`EthernetIpv6Codec`）。
-它不发送 CDC NCM 控制面请求，不建立 Android 网络接口或 VPN 隧道，也不建立 AirPlay、媒体或输入
-会话；iPhone 实际 NCM 接口身份与硬件行为仍需在真实车机/开发板上确认。
+它不发送 CDC NCM 控制面请求；`CarPlayVpnService`/`Ipv6NcmBridge` 现建立 VPN tun 与 NCM IPv6
+桥接，`AirPlaySession` 建立 AirPlay 会话。iPhone 实际 NCM 接口身份与硬件行为仍需在真实车机/开发板上确认。
 
 ## 建议实施阶段
 

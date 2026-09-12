@@ -146,10 +146,10 @@ and the USB 512-byte short-packet pad. `NcmFunctionDiscovery` reads the NCM cont
 (class `0x02`, subclass `0x0D`) and data interface (class `0x0A`, alternate setting 1) descriptors;
 `NcmUsbBridge` claims both interfaces and moves Ethernet frames over the bulk endpoints.
 `EthernetIpv6Codec` strips or restores an untagged Ethernet II header around IPv6 payloads.
+`CarPlayVpnService` and `Ipv6NcmBridge` bind that Ethernet seam to an Android VPN tun on a
+link-local IPv6 address, so the AirPlay control/media sockets have a routable endpoint.
 
-This is the NCM data-path seam only. It does not create an Android network interface or VPN
-tunnel, does not run an AirPlay receiver, and has not been verified against an iPhone or a vehicle
-head unit.
+The NCM/VPN path has not been verified against an iPhone or a vehicle head unit.
 
 ## AirPlay pairing core status
 
@@ -161,6 +161,16 @@ control framing, and request parsing/response building. `MfiSapAuthSetup` builds
 response from the existing MFi coprocessor client. `AirPlayIdentity` and `PairingStore` are
 in-memory models awaiting the session layer for persistence.
 
-This is the pairing/control protocol core. It does not open the TCP :7000 RTSP receiver, serve
-`/info`, or move SETUP/RECORD media streams, and it has not been verified against an iPhone or
-vehicle head unit.
+These are pure protocol state machines with no sockets. The session layer below drives them over
+TCP :7000; they have not been verified against an iPhone or vehicle head unit.
+
+## AirPlay transport/session status
+
+`BplistCodec`, `AirPlayConfig`, `AirPlayInfoPlist`, and `AirPlayHid` implement the binary plist
+wire format, the `/info` capability declaration, and the touch/knob/media/telephony HID
+descriptors and reports. `AirPlaySession` owns one TCP control connection, routes pairing,
+`/auth-setup`, `/info`, SETUP, RECORD, TEARDOWN, `/command`, and `/feedback`, and opens the
+encrypted event channel used to push HID input to the phone. Screen and audio stream setup is
+routed through `AirPlayMediaHandler`; media decode and NTP timing are still deferred.
+
+This has not been verified against an iPhone or vehicle head unit.

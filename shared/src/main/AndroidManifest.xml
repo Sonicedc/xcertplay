@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <uses-feature
         android:name="android.hardware.usb.host"
         android:required="false" />
@@ -19,5 +21,10 @@
                 <category android:name="androidx.car.app.category.POI" />
             </intent-filter>
         </service>
+
+        <service
+            android:name="com.shilapi.xcertplay.network.CarPlayVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false" />
     </application>
 </manifest>
