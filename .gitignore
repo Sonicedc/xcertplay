@@ -1,16 +1,23 @@
+# Android Studio and local IDE state
+.idea/
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
+.vscode/
+
+# Gradle and local tooling
+.gradle/
 .kotlin/
-/build
-/captures
-.externalNativeBuild
-.cxx
+build/
 local.properties
+
+# Native build output
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Local agent working notes
+/agent_docs/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
