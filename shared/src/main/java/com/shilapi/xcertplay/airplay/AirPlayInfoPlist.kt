@@ -14,8 +14,6 @@ object AirPlayInfoPlist {
     private const val STREAM_TYPE_ALT_SCREEN = 111
     private const val DISPLAY_FEATURE_KNOBS = 0x02
     private const val DISPLAY_FEATURE_HIGH_FIDELITY_TOUCH = 0x08
-    private const val PRIMARY_INPUT_KNOBS = 3
-
     private const val CARPLAY_FEATURES = 0x615653aee2L
     private const val CARPLAY_AUDIO_FEATURES = 0x10004540a00L
     private val CARPLAY_FEATURES_NO_AUDIO = CARPLAY_FEATURES and CARPLAY_AUDIO_FEATURES.inv()

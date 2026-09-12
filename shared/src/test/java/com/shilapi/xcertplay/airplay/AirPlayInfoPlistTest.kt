@@ -25,6 +25,7 @@ class AirPlayInfoPlistTest {
         assertEquals(720, view["heightPixels"])
         assertEquals(0, view["originXPixels"])
         assertEquals(0, view["originYPixels"])
+        assertEquals(1, display["primaryInputDevice"])
         assertNotNull(safe)
         assertEquals(1280, safe["widthPixels"])
         assertEquals(720, safe["heightPixels"])

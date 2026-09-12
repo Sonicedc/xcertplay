@@ -68,6 +68,8 @@ class AirPlaySession(
     private var eventSocket: Socket? = null
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
+    private val firstTouchSendLogged = AtomicBoolean(false)
+    private val touchSendFailureLogged = AtomicBoolean(false)
     private val ntp = NtpClock()
     private var keepAliveSocket: DatagramSocket? = null
     private var keepAliveThread: Thread? = null
@@ -112,16 +114,29 @@ class AirPlaySession(
                 output.flush()
             }
             true
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
             false
         }
     }
 
-    fun sendTouch(contacts: List<AirPlayContact>) {
+    fun sendTouch(contacts: List<AirPlayContact>): Boolean {
         val scaled = contacts.map {
             it.copy(x = it.x * config.main.widthPixels, y = it.y * config.main.heightPixels)
         }
-        sendHidReport(AirPlayHid.TOUCH_HID_UID, AirPlayHid.touchReport(scaled))
+        val report = AirPlayHid.touchReport(scaled)
+        val sent = sendHidReport(AirPlayHid.TOUCH_HID_UID, report)
+        if (sent && firstTouchSendLogged.compareAndSet(false, true)) {
+            val first = scaled.firstOrNull()
+            Log.i(
+                TAG,
+                "airplay touch report sent contacts=${scaled.size} first=" +
+                    "(${first?.x},${first?.y},down=${first?.down}) report=${report.toHexString()}",
+            )
+        } else if (!sent && touchSendFailureLogged.compareAndSet(false, true)) {
+            Log.w(TAG, "airplay touch dropped: event channel is not ready")
+        }
+        return sent
     }
 
     fun sendKnob(state: AirPlayKnobState, momentary: Boolean = true) {
@@ -150,8 +165,14 @@ class AirPlaySession(
     fun setNightMode(night: Boolean) =
         sendCommand(linkedMapOf("type" to "setNightMode", "params" to linkedMapOf("nightMode" to night)))
 
-    private fun sendHidReport(uid: Int, report: ByteArray) =
-        sendCommand(linkedMapOf("type" to "hidSendReport", "uuid" to uid.toString(16), "hidReport" to report))
+    private fun sendHidReport(uid: Int, report: ByteArray): Boolean =
+        sendCommand(
+            linkedMapOf(
+                "type" to "hidSendReport",
+                "uuid" to uid.toString(16),
+                "hidReport" to report,
+            ),
+        )
 
     private fun runControl() {
         val input = BufferedInputStream(socket.getInputStream())

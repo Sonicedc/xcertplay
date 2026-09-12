@@ -15,7 +15,7 @@ data class AirPlayDisplayConfig(
     val widthPhysicalMm: Int? = null,
     val heightPhysicalMm: Int? = null,
     val fps: Int = 60,
-    val primaryInputDevice: Int = 3,
+    val primaryInputDevice: Int = 1,
     val viewArea: AirPlayInsets? = null,
     val safeArea: AirPlayInsets? = null,
     val safeAreaDrawOutside: Boolean? = null,

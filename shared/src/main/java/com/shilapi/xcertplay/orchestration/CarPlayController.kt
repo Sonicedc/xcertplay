@@ -101,6 +101,7 @@ class CarPlayController(
         },
     )
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val touchExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val hostId = UUID.randomUUID().toString().uppercase(Locale.US)
     private val systemBuid = UUID.randomUUID().toString().uppercase(Locale.US)
@@ -183,8 +184,15 @@ class CarPlayController(
         }
     }
 
-    fun sendTouch(contacts: List<AirPlayContact>) {
-        activeSession?.sendTouch(contacts)
+    fun sendTouch(contacts: List<AirPlayContact>): Boolean {
+        if (closed) return false
+        val session = activeSession ?: return false
+        return try {
+            touchExecutor.execute { session.sendTouch(contacts) }
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     override fun close() {
@@ -194,6 +202,7 @@ class CarPlayController(
         }
         closeReceivers()
         permissionPollGeneration += 1
+        touchExecutor.shutdownNow()
         val service = vpnService
         unbindVpn()
         Thread(
