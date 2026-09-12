@@ -36,6 +36,7 @@ import com.shilapi.xcertplay.transport.IphoneUsbMatcher
 import com.shilapi.xcertplay.transport.LinuxI2cTransport
 import com.shilapi.xcertplay.transport.LockdownCarKitClient
 import com.shilapi.xcertplay.transport.LockdownPairingClient
+import com.shilapi.xcertplay.transport.LockdownPairRecord
 import com.shilapi.xcertplay.transport.NcmFunctionDiscovery
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.io.Closeable
@@ -78,6 +79,8 @@ class CarPlayController(
     private val listener: AirPlaySessionListener,
     private val media: AirPlayMediaHandler,
     private val reportStatus: (CarPlayStatus) -> Unit,
+    private val loadPairRecord: () -> LockdownPairRecord? = { null },
+    private val savePairRecord: (LockdownPairRecord) -> Unit = {},
 ) : Closeable {
     private enum class Phase { IDLE, MFI, IPHONE, REENUMERATION, CONFIGURING, DATAPATHS, CONTROL }
 
@@ -364,15 +367,18 @@ class CarPlayController(
             val mux = Iap2UsbMuxHost.open(usbSession)
             this.mux = mux
             onStatus(CarPlayStatus.Pairing)
-            val pair = LockdownPairingClient(mux).pair(
-                label = config.label,
-                hostName = config.hostName,
-                hostId = hostId,
-                systemBuid = systemBuid,
-                totalTimeoutMillis = PAIR_TIMEOUT_MILLIS,
-            )
+            val pairRecord = loadPairRecord() ?: LockdownPairingClient(mux)
+                .pair(
+                    label = config.label,
+                    hostName = config.hostName,
+                    hostId = hostId,
+                    systemBuid = systemBuid,
+                    totalTimeoutMillis = PAIR_TIMEOUT_MILLIS,
+                )
+                .pairRecord
+                .also(savePairRecord)
             onStatus(CarPlayStatus.ConnectingControl)
-            val carkit = LockdownCarKitClient(mux).open(pair.pairRecord, config.label)
+            val carkit = LockdownCarKitClient(mux).open(pairRecord, config.label)
             val csm = Iap2CsmChannel.open(carkit)
             this.csm = csm
 

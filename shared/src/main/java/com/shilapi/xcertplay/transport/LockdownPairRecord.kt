@@ -64,8 +64,44 @@ class LockdownPairRecord private constructor(
 
     override fun toString(): String = "LockdownPairRecord(redacted)"
 
-    internal companion object {
-        fun create(
+    companion object {
+        /** Rebuilds a record from previously persisted material; all PEM buffers are copied. */
+        fun restore(
+            hostId: String,
+            systemBuid: String,
+            wifiMacAddress: String,
+            devicePublicKeyPem: ByteArray,
+            deviceCertificatePem: ByteArray,
+            hostPrivateKeyPem: ByteArray,
+            hostCertificatePem: ByteArray,
+            rootPrivateKeyPem: ByteArray,
+            rootCertificatePem: ByteArray,
+        ): LockdownPairRecord {
+            require(hostId.isNotBlank()) { "hostId must not be blank" }
+            require(systemBuid.isNotBlank()) { "systemBuid must not be blank" }
+            require(wifiMacAddress.isNotBlank()) { "wifiMacAddress must not be blank" }
+            listOf(
+                devicePublicKeyPem,
+                deviceCertificatePem,
+                hostPrivateKeyPem,
+                hostCertificatePem,
+                rootPrivateKeyPem,
+                rootCertificatePem,
+            ).forEach { require(it.isNotEmpty()) { "PEM material must not be empty" } }
+            return LockdownPairRecord(
+                hostId = hostId,
+                systemBuid = systemBuid,
+                wifiMacAddress = wifiMacAddress,
+                devicePublicKeyPem = devicePublicKeyPem,
+                deviceCertificatePem = deviceCertificatePem,
+                hostPrivateKeyPem = hostPrivateKeyPem,
+                hostCertificatePem = hostCertificatePem,
+                rootPrivateKeyPem = rootPrivateKeyPem,
+                rootCertificatePem = rootCertificatePem,
+            )
+        }
+
+        internal fun create(
             hostId: String,
             systemBuid: String,
             wifiMacAddress: String,

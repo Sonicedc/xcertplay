@@ -3,6 +3,7 @@ package com.shilapi.xcertplay
 import android.content.Context
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.PairingStore
+import com.shilapi.xcertplay.transport.LockdownPairRecord
 
 /** SharedPreferences persistence for the accessory identity and paired controllers. */
 object AirPlayPersistence {
@@ -11,6 +12,15 @@ object AirPlayPersistence {
     private const val KEY_IDENT_PUBLIC = "identity_public"
     private const val KEY_PAIRING_ID = "pairing_id"
     private const val KEY_PAIRING_IDS = "pairing_ids"
+    private const val KEY_LOCKDOWN_HOST_ID = "lockdown_host_id"
+    private const val KEY_LOCKDOWN_SYSTEM_BUID = "lockdown_system_buid"
+    private const val KEY_LOCKDOWN_WIFI_MAC = "lockdown_wifi_mac"
+    private const val KEY_LOCKDOWN_DEVICE_PUBLIC = "lockdown_device_public"
+    private const val KEY_LOCKDOWN_DEVICE_CERT = "lockdown_device_cert"
+    private const val KEY_LOCKDOWN_HOST_PRIVATE = "lockdown_host_private"
+    private const val KEY_LOCKDOWN_HOST_CERT = "lockdown_host_cert"
+    private const val KEY_LOCKDOWN_ROOT_PRIVATE = "lockdown_root_private"
+    private const val KEY_LOCKDOWN_ROOT_CERT = "lockdown_root_cert"
 
     fun loadIdentity(context: Context): AirPlayIdentity {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -45,6 +55,48 @@ object AirPlayPersistence {
         prefs.edit()
             .putString("pairing.$identifier", longTermPublicKey.toHex())
             .putStringSet(KEY_PAIRING_IDS, identifiers)
+            .apply()
+    }
+
+    fun loadLockdownRecord(context: Context): LockdownPairRecord? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val hostId = prefs.getString(KEY_LOCKDOWN_HOST_ID, null) ?: return null
+        val systemBuid = prefs.getString(KEY_LOCKDOWN_SYSTEM_BUID, null) ?: return null
+        val wifiMac = prefs.getString(KEY_LOCKDOWN_WIFI_MAC, null) ?: return null
+        val devicePublic = prefs.getString(KEY_LOCKDOWN_DEVICE_PUBLIC, null) ?: return null
+        val deviceCert = prefs.getString(KEY_LOCKDOWN_DEVICE_CERT, null) ?: return null
+        val hostPrivate = prefs.getString(KEY_LOCKDOWN_HOST_PRIVATE, null) ?: return null
+        val hostCert = prefs.getString(KEY_LOCKDOWN_HOST_CERT, null) ?: return null
+        val rootPrivate = prefs.getString(KEY_LOCKDOWN_ROOT_PRIVATE, null) ?: return null
+        val rootCert = prefs.getString(KEY_LOCKDOWN_ROOT_CERT, null) ?: return null
+        return try {
+            LockdownPairRecord.restore(
+                hostId = hostId,
+                systemBuid = systemBuid,
+                wifiMacAddress = wifiMac,
+                devicePublicKeyPem = devicePublic.decodeHex(),
+                deviceCertificatePem = deviceCert.decodeHex(),
+                hostPrivateKeyPem = hostPrivate.decodeHex(),
+                hostCertificatePem = hostCert.decodeHex(),
+                rootPrivateKeyPem = rootPrivate.decodeHex(),
+                rootCertificatePem = rootCert.decodeHex(),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun saveLockdownRecord(context: Context, record: LockdownPairRecord) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LOCKDOWN_HOST_ID, record.hostId)
+            .putString(KEY_LOCKDOWN_SYSTEM_BUID, record.systemBuid)
+            .putString(KEY_LOCKDOWN_WIFI_MAC, record.wifiMacAddress)
+            .putString(KEY_LOCKDOWN_DEVICE_PUBLIC, record.devicePublicKeyPem.toHex())
+            .putString(KEY_LOCKDOWN_DEVICE_CERT, record.deviceCertificatePem.toHex())
+            .putString(KEY_LOCKDOWN_HOST_PRIVATE, record.hostPrivateKeyPem.toHex())
+            .putString(KEY_LOCKDOWN_HOST_CERT, record.hostCertificatePem.toHex())
+            .putString(KEY_LOCKDOWN_ROOT_PRIVATE, record.rootPrivateKeyPem.toHex())
+            .putString(KEY_LOCKDOWN_ROOT_CERT, record.rootCertificatePem.toHex())
             .apply()
     }
 

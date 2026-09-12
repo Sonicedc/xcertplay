@@ -568,14 +568,15 @@ removed to preserve the curated test count.
   VID/PIDs are supplied.
 - `AirPlayPersistence` stores the accessory Ed25519 identity and paired-controller long-term keys
   in SharedPreferences, and `PairingStore` reports saves back to that store.
+- The Lockdown USB PairRecord (host/root/device PEM material, HostID, SystemBUID, and WiFi MAC) is
+  also persisted by `AirPlayPersistence` and restored through `LockdownPairRecord.restore`, so the
+  carkit TLS path reconnects without re-requesting trust.
 
 This closes the previously missing host/orchestration seam. It does not prove that two Android
 USB connections can claim the USBMUX and NCM interfaces simultaneously, that the VPN link-local
 route matches the iPhone NCM neighbor discovery, or that any of the stages operate against real
 hardware. Opus decoding remains deferred: the wired reference path negotiates LPCM or AAC-LC, while
 Opus is the wireless low-latency format, so this gap does not block the wired direct-connect scope.
-Lockdown USB pairing records are still not persisted and therefore require a new trust dialog per
-device plug.
 
 ### Build and unit tests
 

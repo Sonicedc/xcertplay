@@ -160,6 +160,8 @@ class CarPlayHostActivity : ComponentActivity() {
             listener = object : AirPlaySessionListener {},
             media = media,
             reportStatus = { status -> setStatus(status.describe()) },
+            loadPairRecord = { AirPlayPersistence.loadLockdownRecord(this) },
+            savePairRecord = { record -> AirPlayPersistence.saveLockdownRecord(this, record) },
         )
         controller = next
         next.start()
