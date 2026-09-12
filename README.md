@@ -203,7 +203,10 @@ menu. The preference is persisted, and the next AirPlay handshake advertises `he
 length-prefixed-to-Annex-B path as H.264. This path is build- and unit-test verified but has not
 been verified against an iPhone or vehicle head unit.
 
-This is the rendering component only. The full-screen SurfaceView host and the USB/NCM/iAP2
+An optional software HEVC decoder switch is also persisted, defaults to off, and takes effect on
+the next handshake.
+
+This is the rendering component only. The full-screen TextureView host and the USB/NCM/iAP2
 orchestration that feeds it are now wired by `CarPlayHostActivity` and `CarPlayController`, and
 the path has not been verified against an iPhone or vehicle head unit.
 
@@ -212,9 +215,9 @@ the path has not been verified against an iPhone or vehicle head unit.
 `CarPlayController` sequences the complete wired path: MFi coprocessor discovery (CH341 USB or
 board I2C), iPhone USB permission and re-enumeration, configuration 6, USBMUX/Lockdown pairing,
 carkit TLS, iAP2 CSM control, NCM data-path open, VPN attach, and the AirPlay `7000` listener. It
-advertises the VPN link-local IPv6 endpoint in CarPlayStartSession and forwards SurfaceView touch
+advertises the VPN link-local IPv6 endpoint in CarPlayStartSession and forwards TextureView touch
 to the active `AirPlaySession`. `CarPlayHostActivity` is the full-screen launcher host with a
-`SurfaceView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. The bundled host configures the CH341
+`TextureView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. The bundled host configures the CH341
 `VID_1A86&PID_5512` bridge, requests USB permission and claims its interface, and shows a live
 bottom-left log of every bring-up stage. iPhones are discovered by Apple vendor ID `0x05AC`
 instead of a hardcoded product ID, and Reconnect MFi / Reconnect iPhone buttons re-run those

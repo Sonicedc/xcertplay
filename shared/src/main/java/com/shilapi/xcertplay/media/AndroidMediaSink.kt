@@ -4,6 +4,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioTrack
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
@@ -25,6 +26,7 @@ class AndroidMediaSink(
     surface: Surface? = null,
     private val videoWidth: Int = 1280,
     private val videoHeight: Int = 720,
+    private val preferSoftwareHevcDecoder: Boolean = false,
 ) : MediaSink {
     private val defaultSurface = surface
     private val surfaces = ConcurrentHashMap<Int, Surface>()
@@ -71,7 +73,12 @@ class AndroidMediaSink(
 
     private fun videoDecoder(type: Int): VideoDecoder =
         videoDecoders.computeIfAbsent(type) {
-            VideoDecoder(surfaces[type] ?: defaultSurface, videoWidth, videoHeight)
+            VideoDecoder(
+                surfaces[type] ?: defaultSurface,
+                videoWidth,
+                videoHeight,
+                preferSoftwareHevcDecoder,
+            )
         }
 
     private fun audioRenderer(type: Int, format: AudioFormat): AudioRenderer =
@@ -89,6 +96,7 @@ private class VideoDecoder(
     surface: Surface?,
     private val width: Int,
     private val height: Int,
+    private val preferSoftwareHevcDecoder: Boolean,
 ) : Closeable {
     private val queue = LinkedBlockingQueue<VideoJob>()
     @Volatile private var running = true
@@ -158,7 +166,7 @@ private class VideoDecoder(
             if (pps.isNotEmpty()) format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
         }
         val next = try {
-            MediaCodec.createDecoderByType(mime).also {
+            createDecoder(mime).also {
                 it.configure(format, surface, null, 0)
                 it.start()
             }
@@ -169,7 +177,28 @@ private class VideoDecoder(
         decoder = next
         renderedFrameLogged = false
         submittedFrameLogged = false
-        if (next != null) Log.i(TAG, "video decoder configured mime=$mime size=${width}x$height")
+        if (next != null) {
+            Log.i(
+                TAG,
+                "video decoder configured name=${next.name} mime=$mime size=${width}x$height",
+            )
+        }
+    }
+
+    private fun createDecoder(mime: String): MediaCodec {
+        if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC && preferSoftwareHevcDecoder) {
+            val software = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
+                !it.isEncoder && it.isSoftwareOnly && mime in it.supportedTypes
+            }
+            if (software != null) {
+                try {
+                    return MediaCodec.createByCodecName(software.name)
+                } catch (error: Exception) {
+                    Log.w(TAG, "software HEVC decoder unavailable name=${software.name}", error)
+                }
+            }
+        }
+        return MediaCodec.createDecoderByType(mime)
     }
 
     private fun changeSurface(surface: Surface?) {
@@ -214,7 +243,7 @@ private class VideoDecoder(
             val index = codec.dequeueOutputBuffer(info, 0)
             when {
                 index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> logOutputFormat(codec.outputFormat)
                 index >= 0 -> {
                     val render = outputSurface != null
                     codec.releaseOutputBuffer(index, render)
@@ -227,6 +256,20 @@ private class VideoDecoder(
                 else -> return
             }
         }
+    }
+
+    private fun logOutputFormat(format: MediaFormat) {
+        Log.i(
+            TAG,
+            "video decoder output format " +
+                "size=${format.intOrNull(MediaFormat.KEY_WIDTH)}x" +
+                "${format.intOrNull(MediaFormat.KEY_HEIGHT)} " +
+                "stride=${format.intOrNull(MediaFormat.KEY_STRIDE)} " +
+                "slice=${format.intOrNull(MediaFormat.KEY_SLICE_HEIGHT)} " +
+                "standard=${format.intOrNull(MediaFormat.KEY_COLOR_STANDARD)} " +
+                "range=${format.intOrNull(MediaFormat.KEY_COLOR_RANGE)} " +
+                "transfer=${format.intOrNull(MediaFormat.KEY_COLOR_TRANSFER)}",
+        )
     }
 
     @Synchronized
@@ -254,6 +297,17 @@ private class VideoDecoder(
         val START_CODE = byteArrayOf(0x00, 0x00, 0x00, 0x01)
     }
 }
+
+private fun MediaFormat.intOrNull(key: String): Int? =
+    if (!containsKey(key)) {
+        null
+    } else {
+        try {
+            getInteger(key)
+        } catch (_: Exception) {
+            null
+        }
+    }
 
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
 private class AudioRenderer(private val format: AudioFormat) : Closeable {

@@ -10,6 +10,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.LockSupport
 
 /**
  * Moves IPv6 packets between an Android VpnService tun and the iPhone NCM Ethernet link.
@@ -64,17 +65,21 @@ class Ipv6NcmBridge(
         try {
             while (running.get()) {
                 val frame = ncm.recv(READ_TIMEOUT_MILLIS) ?: continue
-                val ipv6 = EthernetIpv6Codec.parseIpv6(frame) ?: continue
+                val ipv6 = EthernetIpv6Codec.parseIpv6View(frame) ?: continue
                 peerMac = ipv6.sourceMac
                 if (!loggedInbound) {
                     loggedInbound = true
-                    Log.i(TAG, "ncm first inbound ipv6 bytes=${ipv6.ipv6.size} peer=${ipv6.sourceMac.macString()}")
+                    Log.i(
+                        TAG,
+                        "ncm first inbound ipv6 bytes=${ipv6.payloadLength} " +
+                            "peer=${ipv6.sourceMac.macString()}",
+                    )
                 }
                 if (inboundLogBudget > 0) {
                     inboundLogBudget--
-                    Log.i(TAG, "ncm inbound ${ipv6.ipv6.summary()}")
+                    Log.i(TAG, "ncm inbound ${frame.summary(ipv6.payloadOffset)}")
                 }
-                output.write(ipv6.ipv6)
+                output.write(frame, ipv6.payloadOffset, ipv6.payloadLength)
             }
         } catch (error: IOException) {
             if (running.get()) onError(error)
@@ -95,7 +100,10 @@ class Ipv6NcmBridge(
                 }
                 // Android's TUN fd may transiently report a zero-byte read while its network is
                 // being registered. It is neither EOF (-1) nor an IPv6 packet.
-                if (length == 0) continue
+                if (length == 0) {
+                    LockSupport.parkNanos(ZERO_READ_BACKOFF_NANOS)
+                    continue
+                }
                 val tunPacket = buffer.copyOf(length)
                 val ipv6 = EthernetIpv6Codec.addNeighborAdvertisementTargetMac(tunPacket, hostMac)
                 if (ipv6.size != tunPacket.size) {
@@ -103,7 +111,7 @@ class Ipv6NcmBridge(
                 }
                 if (outboundLogBudget > 0) {
                     outboundLogBudget--
-                    Log.i(TAG, "ncm outbound ${ipv6.summary()}")
+                    Log.i(TAG, "ncm outbound ${ipv6.summary(0)}")
                 }
                 val multicastMac = EthernetIpv6Codec.multicastDestinationMac(ipv6)
                 val mac = multicastMac ?: peerMac
@@ -144,18 +152,19 @@ class Ipv6NcmBridge(
     private fun ByteArray.macString(): String =
         joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
-    private fun ByteArray.summary(): String {
-        if (size < 40) return "truncated bytes=$size"
-        val source = InetAddress.getByAddress(copyOfRange(8, 24)).hostAddress
-        val destination = InetAddress.getByAddress(copyOfRange(24, 40)).hostAddress
-        val nextHeader = this[6].toInt() and 0xff
+    private fun ByteArray.summary(offset: Int): String {
+        val payloadBytes = size - offset
+        if (payloadBytes < 40) return "truncated bytes=$payloadBytes"
+        val source = InetAddress.getByAddress(copyOfRange(offset + 8, offset + 24)).hostAddress
+        val destination = InetAddress.getByAddress(copyOfRange(offset + 24, offset + 40)).hostAddress
+        val nextHeader = this[offset + 6].toInt() and 0xff
         val detail = when {
-            nextHeader == 6 && size >= 44 -> " tcp=${u16(40)}->${u16(42)}"
-            nextHeader == 17 && size >= 44 -> " udp=${u16(40)}->${u16(42)}"
-            nextHeader == 58 && size >= 41 -> " icmp6=${this[40].toInt() and 0xff}"
+            nextHeader == 6 && payloadBytes >= 44 -> " tcp=${u16(offset + 40)}->${u16(offset + 42)}"
+            nextHeader == 17 && payloadBytes >= 44 -> " udp=${u16(offset + 40)}->${u16(offset + 42)}"
+            nextHeader == 58 && payloadBytes >= 41 -> " icmp6=${this[offset + 40].toInt() and 0xff}"
             else -> ""
         }
-        return "bytes=$size src=$source dst=$destination next=$nextHeader$detail"
+        return "bytes=$payloadBytes src=$source dst=$destination next=$nextHeader$detail"
     }
 
     private fun ByteArray.u16(offset: Int): Int =
@@ -166,6 +175,7 @@ class Ipv6NcmBridge(
         const val READ_TIMEOUT_MILLIS = 1_000L
         const val WRITE_TIMEOUT_MILLIS = 2_000
         const val TUN_READ_BYTES = 4_096
+        const val ZERO_READ_BACKOFF_NANOS = 1_000_000L
         const val JOIN_TIMEOUT_MILLIS = 2_000L
     }
 }

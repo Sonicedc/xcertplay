@@ -64,17 +64,33 @@ object MediaCodecSupport {
         ) {
             return lengthPrefixed
         }
-        val output = ArrayList<Byte>()
+
+        var inputOffset = 0
+        var outputSize = 0
+        while (inputOffset + 4 <= lengthPrefixed.size) {
+            val length = readU32Be(lengthPrefixed, inputOffset)
+            inputOffset += 4
+            if (length <= 0 || inputOffset + length > lengthPrefixed.size) break
+            if (length > Int.MAX_VALUE - outputSize - START_CODE.size) break
+            outputSize += START_CODE.size + length
+            inputOffset += length
+        }
+        if (outputSize == 0) return ByteArray(0)
+
+        val output = ByteArray(outputSize)
         var offset = 0
+        var outputOffset = 0
         while (offset + 4 <= lengthPrefixed.size) {
             val length = readU32Be(lengthPrefixed, offset)
             offset += 4
             if (length <= 0 || offset + length > lengthPrefixed.size) break
-            output.addAll(START_CODE.toList())
-            for (index in offset until offset + length) output.add(lengthPrefixed[index])
+            START_CODE.copyInto(output, outputOffset)
+            outputOffset += START_CODE.size
+            lengthPrefixed.copyInto(output, outputOffset, offset, offset + length)
+            outputOffset += length
             offset += length
         }
-        return output.toByteArray()
+        return output
     }
 
     /** Wraps one raw AAC-LC access unit in an MPEG-4 ADTS frame. */

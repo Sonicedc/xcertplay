@@ -6,6 +6,21 @@ import org.junit.Test
 
 class MediaCodecSupportTest {
     @Test
+    fun lengthPrefixedNalUnitsBecomeOneAnnexBBuffer() {
+        val first = byteArrayOf(0x40, 0x01)
+        val second = byteArrayOf(0x42, 0x01, 0x02)
+        val lengthPrefixed =
+            byteArrayOf(0, 0, 0, first.size.toByte()) + first +
+                byteArrayOf(0, 0, 0, second.size.toByte()) + second
+
+        assertArrayEquals(
+            byteArrayOf(0, 0, 0, 1) + first +
+                byteArrayOf(0, 0, 0, 1) + second,
+            MediaCodecSupport.toAnnexB(lengthPrefixed),
+        )
+    }
+
+    @Test
     fun hevcCodecSpecificDataBuildsAnnexBParameterSets() {
         val vps = byteArrayOf(0x40, 0x01)
         val sps = byteArrayOf(0x42, 0x01, 0x02)

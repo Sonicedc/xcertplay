@@ -36,6 +36,8 @@ class NcmUsbBridge internal constructor(
     private val frames = ArrayDeque<ByteArray>()
     private var queuedBytes = 0
     private var buffered = ByteArray(0)
+    private var bufferedSize = 0
+    private val readBuffer = ByteArray(READ_CHUNK_BYTES)
     private val statusRunning = AtomicBoolean(statusEndpoint != null)
     private val statusThread = statusEndpoint?.let { endpoint ->
         Thread({ drainStatus(endpoint) }, "ncm-status-in").apply {
@@ -90,9 +92,10 @@ class NcmUsbBridge internal constructor(
                 if (frames.isNotEmpty()) return pollFrame()
                 val remainingNanos = deadline - System.nanoTime()
                 if (remainingNanos <= 0) return null
-                val chunk = readChunk((remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
-                    ?: continue
-                buffered += chunk
+                val chunkLength =
+                    readChunk((remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
+                        ?: continue
+                appendBuffered(readBuffer, chunkLength)
             }
         }
     }
@@ -145,23 +148,35 @@ class NcmUsbBridge internal constructor(
 
     private fun drainFrames() {
         while (true) {
-            if (buffered.size < 12) return
+            if (bufferedSize < 12) return
             if (readU32(buffered, 0) != Ntb16Codec.NTH16_SIG) {
                 throw failSession("NCM read buffer does not begin with an NTB16 header")
             }
             val blockLength = readU16(buffered, 8)
             if (blockLength < 28) throw failSession("Invalid NTB16 block length $blockLength")
-            if (buffered.size < blockLength) return
-            for (frame in Ntb16Codec.parse(buffered.copyOfRange(0, blockLength))) enqueueFrame(frame)
-            var consumed = blockLength
-            if (blockLength % USB_PACKET_SIZE == 0 &&
-                buffered.size > blockLength &&
-                buffered[blockLength].toInt() == 0
-            ) {
-                consumed++
+            val padded = blockLength % USB_PACKET_SIZE == 0
+            val wireLength = blockLength + if (padded) 1 else 0
+            if (bufferedSize < wireLength) return
+            if (padded && buffered[blockLength].toInt() != 0) {
+                throw failSession("Invalid NTB16 short-packet pad")
             }
-            buffered = buffered.copyOfRange(consumed, buffered.size)
+            for (frame in Ntb16Codec.parse(buffered, 0, blockLength)) enqueueFrame(frame)
+            val remaining = bufferedSize - wireLength
+            buffered.copyInto(buffered, 0, wireLength, bufferedSize)
+            bufferedSize = remaining
         }
+    }
+
+    private fun appendBuffered(source: ByteArray, length: Int) {
+        val required = bufferedSize + length
+        if (required > buffered.size) {
+            val capacity = maxOf(required, maxOf(READ_CHUNK_BYTES, buffered.size * 2))
+            val grown = ByteArray(capacity)
+            buffered.copyInto(grown, 0, 0, bufferedSize)
+            buffered = grown
+        }
+        source.copyInto(buffered, bufferedSize, 0, length)
+        bufferedSize += length
     }
 
     private fun enqueueFrame(frame: ByteArray) {
@@ -178,18 +193,17 @@ class NcmUsbBridge internal constructor(
         return frame
     }
 
-    private fun readChunk(timeoutMillis: Long): ByteArray? {
+    private fun readChunk(timeoutMillis: Long): Int? {
         checkOpen()
-        val buffer = ByteArray(READ_CHUNK_BYTES)
         val transferred = try {
-            connection.bulkTransfer(inEndpoint, buffer, buffer.size, timeoutMillis.toInt())
+            connection.bulkTransfer(inEndpoint, readBuffer, readBuffer.size, timeoutMillis.toInt())
         } catch (error: RuntimeException) {
             throw failSession("NCM read failed", error)
         }
         // Android reports both an ordinary bulk-IN timeout and a NAK as a negative result. Keep
         // polling: USBMUX owns authoritative detach/failure detection for the same phone.
         if (transferred <= 0) return null
-        return buffer.copyOf(transferred)
+        return transferred
     }
 
     private fun failSession(message: String, cause: Throwable? = null): IphoneUsbException.DeviceUnavailable {

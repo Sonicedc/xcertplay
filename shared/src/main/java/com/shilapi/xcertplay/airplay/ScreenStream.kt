@@ -96,10 +96,10 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                     Log.i(
                         TAG,
                         "video first decrypted frame sealed=${body.size} plain=${payload.size} " +
-                            "head=${payload.hexPrefix(16)}",
+                        "head=${payload.hexPrefix(16)}",
                     )
                 }
-                listener.onFrame(payload)
+                listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload))
             }
             OP_VIDEO_CONFIG -> {
                 val (codec, codecData) = ScreenCodec.detectConfig(body)
@@ -141,6 +141,36 @@ object ScreenCodec {
         if (body.size < TAG_SIZE) body
         else AirPlayCrypto.chachaOpen(key, AirPlayCrypto.nonce64(counter), body, header)
 
+    /**
+     * Replaces each four-byte NAL length with an Annex B start code in place.
+     *
+     * The payload is left untouched unless every length-prefixed NAL is valid, so malformed
+     * input keeps its original bytes for the normal decoder error path.
+     */
+    fun lengthPrefixedToAnnexB(payload: ByteArray): ByteArray {
+        if (payload.size < 4 || payload.startsWithStartCode()) return payload
+
+        var offset = 0
+        while (offset + 4 <= payload.size) {
+            val length = readU32Be(payload, offset)
+            offset += 4
+            if (length <= 0 || offset + length > payload.size) return payload
+            offset += length
+        }
+        if (offset != payload.size) return payload
+
+        offset = 0
+        while (offset + 4 <= payload.size) {
+            val length = readU32Be(payload, offset)
+            payload[offset] = 0
+            payload[offset + 1] = 0
+            payload[offset + 2] = 0
+            payload[offset + 3] = 1
+            offset += 4 + length
+        }
+        return payload
+    }
+
     fun detectConfig(payload: ByteArray): Pair<VideoCodec, ByteArray> {
         for (index in 4..payload.size - 4) {
             val fourcc = String(payload, index, 4, Charsets.US_ASCII)
@@ -165,6 +195,19 @@ object ScreenCodec {
 
     const val TAG_SIZE = 16
 }
+
+private fun ByteArray.startsWithStartCode(): Boolean =
+    size >= 4 &&
+        this[0] == 0.toByte() &&
+        this[1] == 0.toByte() &&
+        this[2] == 0.toByte() &&
+        this[3] == 1.toByte()
+
+private fun readU32Be(source: ByteArray, offset: Int): Int =
+    ((source[offset].toInt() and 0xff) shl 24) or
+        ((source[offset + 1].toInt() and 0xff) shl 16) or
+        ((source[offset + 2].toInt() and 0xff) shl 8) or
+        (source[offset + 3].toInt() and 0xff)
 
 private fun readU32Le(source: ByteArray, offset: Int): Int =
     (source[offset].toInt() and 0xff) or

@@ -532,11 +532,15 @@ and NTP clock initialization passed and was then removed.
 - HEVC/H.265 is enabled by default, persisted in `AirPlayPersistence`, and exposed as a switch in
   the three-finger settings menu. A fresh handshake advertises `hevcInfo` and the `hevc` enabled
   feature when selected; switching the value takes effect when the settings menu closes.
+- An HEVC software-decoder switch is persisted separately, defaults to off, and selects a
+  MediaCodec-listed software HEVC decoder on the next handshake. If no software decoder is
+  available, decoder creation falls back to the platform default.
 - `CarPlayTouchMapper` normalizes Android MotionEvents into up to two `AirPlayContact`s for
   `AirPlaySession.sendTouch`.
 
-The HEVC negotiation, hvcC conversion, persistence, and menu path are build- and unit-test
-verified, but the complete path has not been verified against an iPhone or vehicle head unit.
+The HEVC negotiation, hvcC conversion, decoder selection, persistence, and menu path are build-
+and unit-test verified, but the complete path has not been verified against an iPhone or vehicle
+head unit.
 
 ### Build and unit tests
 
@@ -564,8 +568,8 @@ removed to preserve the curated test count.
   USBMUX, Lockdown Pair, carkit TLS, iAP2 CSM, NCM data-path open, VPN attach, and the AirPlay
   `7000` listener. It advertises `config.linkLocal` and `airPlayConfig.port` in the wired
   CarPlayStartSession and forwards touch to the active `AirPlaySession`.
-- `CarPlayHostActivity` is the full-screen launcher host: a `SurfaceView` plus `AndroidMediaSink`
-  and `CarPlayMediaEngine`, SurfaceView touch mapping through `CarPlayTouchMapper`, and VPN consent
+- `CarPlayHostActivity` is the full-screen launcher host: a `TextureView` plus `AndroidMediaSink`
+  and `CarPlayMediaEngine`, TextureView touch mapping through `CarPlayTouchMapper`, and VPN consent
   through `CarPlayVpnService.prepare`. The bundled runtime config names the CH341
   `VID_1A86&PID_5512&REV_0304` bridge, declares a matching `usb-device` filter, requests USB
   permission, and claims the CH341 interface for exclusive use. A timestamped log panel in the
@@ -599,7 +603,7 @@ $env:OS = "Windows_NT"
 2026-09-12 Genymotion smoke: `mobile-debug.apk` installed on the documented emulator and
 `CarPlayHostActivity` launched as the launcher. The activity reached top resumed/focused state
 (PID 8842, displayed +376 ms) with no `FATAL EXCEPTION` or `AndroidRuntime` entries in logcat. This
-verifies only the host Activity/SurfaceView lifecycle on an emulator, not any USB, VPN, NCM,
+verifies only the host Activity/TextureView lifecycle on an emulator, not any USB, VPN, NCM,
 CarPlay, or MFi hardware behavior.
 
 2026-09-12 CH341 UI smoke: a `uiautomator` dump of the running host shows the bottom-left timestamped

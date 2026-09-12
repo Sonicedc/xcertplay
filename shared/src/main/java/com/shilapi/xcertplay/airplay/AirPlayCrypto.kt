@@ -98,7 +98,8 @@ object AirPlayCrypto {
         val output = ByteArray(cipher.getOutputSize(ciphertextAndTag.size))
         val processed = cipher.processBytes(ciphertextAndTag, 0, ciphertextAndTag.size, output, 0)
         val finalized = cipher.doFinal(output, processed)
-        return output.copyOf(processed + finalized)
+        val outputLength = processed + finalized
+        return if (outputLength == output.size) output else output.copyOf(outputLength)
     }
 
     /** 12-byte nonce: four zero bytes followed by an eight-byte little-endian counter. */

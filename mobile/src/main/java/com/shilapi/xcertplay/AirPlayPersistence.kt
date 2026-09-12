@@ -24,6 +24,7 @@ object AirPlayPersistence {
     private const val KEY_LOCKDOWN_ROOT_CERT = "lockdown_root_cert"
     private const val KEY_DISPLAY_SCALE_TENTHS = "display_scale_tenths"
     private const val KEY_HEVC_ENABLED = "hevc_enabled"
+    private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
 
     fun loadDisplayScaleTenths(context: Context): Int {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -45,6 +46,16 @@ object AirPlayPersistence {
     fun saveHevcEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_HEVC_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadHevcSoftwareDecoderEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HEVC_SOFTWARE_DECODER, false)
+
+    fun saveHevcSoftwareDecoderEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_HEVC_SOFTWARE_DECODER, enabled)
             .apply()
     }
 

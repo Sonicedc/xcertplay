@@ -18,6 +18,12 @@ object EthernetIpv6Codec {
         val ipv6: ByteArray,
     )
 
+    data class Ipv6FrameView(
+        val sourceMac: ByteArray,
+        val payloadOffset: Int,
+        val payloadLength: Int,
+    )
+
     /** Returns null for tagged frames, non-IPv6 frames, or truncated input. */
     fun parseIpv6(frame: ByteArray): Ipv6Frame? {
         if (frame.size < HEADER_BYTES || readU16(frame, 12) != ETHERTYPE_IPV6) return null
@@ -25,6 +31,16 @@ object EthernetIpv6Codec {
             sourceMac = frame.copyOfRange(6, 12),
             destinationMac = frame.copyOfRange(0, 6),
             ipv6 = frame.copyOfRange(HEADER_BYTES, frame.size),
+        )
+    }
+
+    /** Returns an allocation-light view for callers that can consume the payload in place. */
+    fun parseIpv6View(frame: ByteArray): Ipv6FrameView? {
+        if (frame.size <= HEADER_BYTES || readU16(frame, 12) != ETHERTYPE_IPV6) return null
+        return Ipv6FrameView(
+            sourceMac = frame.copyOfRange(6, 12),
+            payloadOffset = HEADER_BYTES,
+            payloadLength = frame.size - HEADER_BYTES,
         )
     }
 

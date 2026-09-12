@@ -19,7 +19,7 @@ object Ntb16Codec {
     /** Wraps one Ethernet frame in one NTB16 block, padding an exact 512-byte boundary. */
     fun build(frame: ByteArray, sequence: Int): ByteArray {
         require(frame.isNotEmpty()) { "frame must not be empty" }
-        require(frame.size <= 0xffff) { "frame exceeds the NTB16 length field" }
+        require(frame.size <= MAX_DATAGRAM_BYTES) { "frame exceeds the NTB16 length field" }
         require(sequence in 0..0xffff) { "sequence must fit in u16" }
 
         val blockLength = DATAGRAM_INDEX + frame.size
@@ -49,30 +49,39 @@ object Ntb16Codec {
      * Wire garbage returns an empty list instead of throwing; malformed entries are skipped where
      * a bounds check fails. A step guard stops a malformed NDP pointer chain from cycling.
      */
-    fun parse(block: ByteArray): List<ByteArray> {
-        if (block.size < NTH_LENGTH || readU32(block, 0) != NTH16_SIG) return emptyList()
+    fun parse(block: ByteArray): List<ByteArray> = parse(block, 0, block.size)
+
+    /** Parses one NTB16 block from [offset] without copying the containing buffer. */
+    fun parse(block: ByteArray, offset: Int, length: Int): List<ByteArray> {
+        require(offset >= 0 && length >= 0 && offset <= block.size - length) {
+            "NTB16 range is outside the source buffer"
+        }
+        val end = offset + length
+        if (length < NTH_LENGTH || readU32(block, offset) != NTH16_SIG) return emptyList()
 
         val datagrams = ArrayList<ByteArray>(1)
-        var ndpOffset = readU16(block, 10)
+        var ndpOffset = offset + readU16(block, offset + 10)
         var hops = 0
-        val maxHops = maxOf(1, block.size / 4)
+        val maxHops = maxOf(1, length / 4)
         while (ndpOffset != 0 && hops < maxHops) {
-            if (ndpOffset + 12 > block.size) break
+            if (ndpOffset < offset || ndpOffset + 12 > end) break
             if (readU32(block, ndpOffset) and 0x00ffffff != NDP16_SIG and 0x00ffffff) break
             val ndpLength = readU16(block, ndpOffset + 4)
             val nextNdp = readU16(block, ndpOffset + 6)
             var entry = ndpOffset + 8
-            val end = minOf(ndpOffset + ndpLength, block.size)
-            while (entry + 4 <= end) {
+            val ndpEnd = minOf(ndpOffset + ndpLength, end)
+            while (entry + 4 <= ndpEnd) {
                 val datagramIndex = readU16(block, entry)
                 val datagramLength = readU16(block, entry + 2)
                 if (datagramIndex == 0 || datagramLength == 0) break
-                if (datagramIndex + datagramLength <= block.size) {
-                    datagrams.add(block.copyOfRange(datagramIndex, datagramIndex + datagramLength))
+                val datagramStart = offset + datagramIndex
+                val datagramEnd = datagramStart + datagramLength
+                if (datagramStart >= offset && datagramStart <= end && datagramEnd <= end) {
+                    datagrams.add(block.copyOfRange(datagramStart, datagramEnd))
                 }
                 entry += 4
             }
-            ndpOffset = nextNdp
+            ndpOffset = if (nextNdp == 0) 0 else offset + nextNdp
             hops++
         }
         return datagrams
@@ -98,4 +107,6 @@ object Ntb16Codec {
             ((source[offset + 1].toInt() and 0xff) shl 8) or
             ((source[offset + 2].toInt() and 0xff) shl 16) or
             ((source[offset + 3].toInt() and 0xff) shl 24)
+
+    private const val MAX_DATAGRAM_BYTES = 0xffff - DATAGRAM_INDEX
 }

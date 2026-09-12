@@ -81,6 +81,7 @@ class CarPlayVpnService : VpnService() {
                 .addRoute(LINK_LOCAL_ROUTE, LINK_PREFIX)
                 .setSession(SESSION_NAME)
                 .setMtu(TUN_MTU)
+                .setBlocking(true)
                 .establish()
                 ?: throw IOException("VpnService.establish returned null")
             tun = tunFd

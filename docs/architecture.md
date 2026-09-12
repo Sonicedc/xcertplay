@@ -161,10 +161,11 @@ CarPlay 的媒体/输入数据通道在 USBMUX/iAP2 控制通道之外，由 iPh
 
 The AirPlay session layer's MediaCodec/AudioTrack rendering seam is now filled by
 `AndroidMediaSink`, with `MediaCodecSupport` for avcC/hvcC, Annex B, RFC 3640 AAC/ADTS, and LPCM
-conversion, and `CarPlayTouchMapper` for SurfaceView touch forwarding. Opus decoding is skipped
+conversion, and `CarPlayTouchMapper` for TextureView touch forwarding. Opus decoding is skipped
 pending a native decoder. HEVC/H.265 transport defaults to enabled, is persisted by
 `AirPlayPersistence`, and can be toggled in the three-finger settings menu. The hvcC record is
-converted to Annex B VPS/SPS/PPS CSD before being handed to Android MediaCodec.
+converted to Annex B VPS/SPS/PPS CSD before being handed to Android MediaCodec. A separate
+software-HEVC decoder preference defaults to off and applies on the next handshake.
 
 ## Wired integration (2026-09-12)
 
@@ -172,8 +173,8 @@ converted to Annex B VPS/SPS/PPS CSD before being handed to Android MediaCodec.
 discovery through CH341 or board I2C, iPhone USB permission and re-enumeration, configuration 6
 selection, USBMUX/Lockdown pairing, carkit TLS, iAP2 CSM control, NCM data-path open, VPN attach,
 and the AirPlay `7000` listener. It advertises the VPN link-local IPv6 endpoint in the wired
-CarPlayStartSession and forwards SurfaceView touch contacts to the active `AirPlaySession`.
-`CarPlayHostActivity` is the full-screen launcher host with a `SurfaceView`, `AndroidMediaSink`,
+CarPlayStartSession and forwards TextureView touch contacts to the active `AirPlaySession`.
+`CarPlayHostActivity` is the full-screen launcher host with a `TextureView`, `AndroidMediaSink`,
 and `CarPlayMediaEngine`. Deployment VID/PIDs are supplied in `CarPlayRuntimeConfig`; the activity
 shows a configuration status until the deployer provides the measured Apple/CH341 identities. The
 path remains hardware-unverified.

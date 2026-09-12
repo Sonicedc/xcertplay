@@ -4,6 +4,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -13,8 +14,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -54,7 +54,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Full-screen CarPlay host. It renders decoded video through a [SurfaceView], forwards touch to
+ * Full-screen CarPlay host. It renders decoded video through a [TextureView], forwards touch to
  * the active AirPlay session, and drives the complete wired bring-up through [CarPlayController].
  *
  * Apple devices are discovered by vendor ID; CH341 uses the configured VID/PID below.
@@ -88,7 +88,7 @@ class CarPlayHostActivity : ComponentActivity() {
             }
         }
 
-    private var surfaceView: SurfaceView? = null
+    private var videoView: TextureView? = null
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
     private var statusView: TextView? = null
@@ -102,6 +102,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var pendingDisplaySize: DisplaySize? = null
     private var displayScaleTenths = CarPlayDisplayScale.DEFAULT_TENTHS
     private var hevcEnabled = true
+    private var hevcSoftwareDecoderEnabled = false
     private var awaitingVpnConsent = false
     private var vpnReady = false
     private var userLeaving = false
@@ -123,26 +124,32 @@ class CarPlayHostActivity : ComponentActivity() {
         applyDisplaySize(size)
     }
 
-    private val surfaceCallback = object : SurfaceHolder.Callback {
-        override fun surfaceCreated(holder: SurfaceHolder) {
-            currentSurface = holder.surface
-            appendLog("Surface created")
-            attachSurface(holder.surface)
-        }
-
-        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-            currentSurface = holder.surface
+    private val textureListener = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+            val surface = Surface(texture)
+            currentSurface?.release()
+            currentSurface = surface
+            appendLog("Texture surface created")
+            attachSurface(surface)
             scheduleDisplaySize(width, height)
         }
 
-        override fun surfaceDestroyed(holder: SurfaceHolder) {
-            if (currentSurface === holder.surface) {
-                currentSurface = null
-                sink?.clearSurface(SCREEN_TYPE_MAIN, holder.surface)
-                sink?.clearSurface(SCREEN_TYPE_ALT, holder.surface)
-            }
-            appendLog("Surface destroyed")
+        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            scheduleDisplaySize(width, height)
         }
+
+        override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+            currentSurface?.let { surface ->
+                sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
+                sink?.clearSurface(SCREEN_TYPE_ALT, surface)
+                surface.release()
+            }
+            currentSurface = null
+            appendLog("Texture surface destroyed")
+            return true
+        }
+
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -150,6 +157,7 @@ class CarPlayHostActivity : ComponentActivity() {
         airPlayIdentity = AirPlayPersistence.loadIdentity(this)
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
+        hevcSoftwareDecoderEnabled = AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
         setContentView(buildContentView())
         hideSystemBars()
         onBackPressedDispatcher.addCallback(
@@ -200,9 +208,9 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         hideSystemBars()
-        surfaceView?.post {
-            val surface = surfaceView ?: return@post
-            scheduleDisplaySize(surface.width, surface.height)
+        videoView?.post {
+            val view = videoView ?: return@post
+            scheduleDisplaySize(view.width, view.height)
         }
     }
 
@@ -217,12 +225,12 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun buildContentView(): View {
         val root = FrameLayout(this)
-        val surface = SurfaceView(this).apply {
+        val video = TextureView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             )
-            holder.addCallback(surfaceCallback)
+            surfaceTextureListener = textureListener
         }
         val gestureLayer = View(this).apply {
             isClickable = true
@@ -280,7 +288,7 @@ class CarPlayHostActivity : ComponentActivity() {
         reconnectParams.setMargins(dp(12), dp(12), 0, 0)
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
 
-        root.addView(surface)
+        root.addView(video)
         root.addView(
             gestureLayer,
             FrameLayout.LayoutParams(
@@ -297,7 +305,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
-        surfaceView = surface
+        videoView = video
         gestureOverlay = gestureLayer
         settingsMenu = settings
         statusView = log
@@ -449,6 +457,55 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(30) },
         )
 
+        val softwareHevcRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        softwareHevcRow.addView(
+            menuText("HEVC software decoder", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val softwareHevcSwitch = Switch(this).apply {
+            isChecked = hevcSoftwareDecoderEnabled
+            contentDescription = "Use software HEVC decoder"
+            showText = false
+            thumbTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+            )
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
+            )
+            setOnCheckedChangeListener { _, checked ->
+                if (hevcSoftwareDecoderEnabled == checked) return@setOnCheckedChangeListener
+                hevcSoftwareDecoderEnabled = checked
+                AirPlayPersistence.saveHevcSoftwareDecoderEnabled(
+                    this@CarPlayHostActivity,
+                    hevcSoftwareDecoderEnabled,
+                )
+                appendLog(
+                    "HEVC software decoder ${if (hevcSoftwareDecoderEnabled) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                updateResolutionMenu()
+            }
+        }
+        softwareHevcRow.addView(
+            softwareHevcSwitch,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        content.addView(
+            softwareHevcRow,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(16) },
+        )
+
         val preview = menuText("", 17f, MENU_SECONDARY)
         content.addView(
             preview,
@@ -525,8 +582,12 @@ class CarPlayHostActivity : ComponentActivity() {
             "Handshake resolution: ${native.width} x ${native.height} -> " +
                 "${negotiated.widthPixels} x ${negotiated.heightPixels}"
         }
-        resolutionPreviewView?.text =
-            "$resolution\nVideo transport: ${if (hevcEnabled) "HEVC (H.265)" else "H.264"}"
+        val transport = if (!hevcEnabled) {
+            "H.264"
+        } else {
+            "HEVC (H.265, ${if (hevcSoftwareDecoderEnabled) "software" else "hardware"})"
+        }
+        resolutionPreviewView?.text = "$resolution\nVideo transport: $transport"
     }
 
     private fun createAirPlayConfig(size: DisplaySize): AirPlayConfig {
@@ -553,19 +614,22 @@ class CarPlayHostActivity : ComponentActivity() {
             "Starting CarPlay controller at ${size.width}x${size.height} -> " +
                 "${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
                 "(${CarPlayDisplayScale.label(displayScaleTenths)}) " +
-                "video=${if (airPlayConfig.hevc) "HEVC" else "H.264"}",
+                "video=${if (airPlayConfig.hevc) "HEVC" else "H.264"} " +
+                "decoder=${if (airPlayConfig.hevc && hevcSoftwareDecoderEnabled) "software" else "hardware"}",
         )
         Log.i(
             TAG,
             "starting controller display=${size.width}x${size.height} " +
                 "negotiated=${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
                 "scale=${CarPlayDisplayScale.label(displayScaleTenths)} " +
-                "hevc=${airPlayConfig.hevc}",
+                "hevc=${airPlayConfig.hevc} " +
+                "softwareHevc=${airPlayConfig.hevc && hevcSoftwareDecoderEnabled}",
         )
         val renderer = AndroidMediaSink(
             surface = null,
             videoWidth = airPlayConfig.main.widthPixels,
             videoHeight = airPlayConfig.main.heightPixels,
+            preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
         )
         sink = renderer
         currentSurface?.let(::attachSurface)
