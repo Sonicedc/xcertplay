@@ -20,7 +20,6 @@ import com.shilapi.xcertplay.airplay.AirPlayDisplayConfig
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.CarPlayMediaEngine
-import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.network.CarPlayVpnService
@@ -52,7 +51,7 @@ class CarPlayHostActivity : ComponentActivity() {
         sourceVersion = "1.0.0",
         main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
     )
-    private val airPlayIdentity = AirPlayIdentity.generate()
+    private lateinit var airPlayIdentity: AirPlayIdentity
     private val identification = Iap2IdentificationConfig(
         name = "xcertplay",
         modelIdentifier = "xcertplay",
@@ -89,6 +88,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        airPlayIdentity = AirPlayPersistence.loadIdentity(this)
         setContentView(buildContentView())
         hideSystemBars()
 
@@ -148,12 +148,15 @@ class CarPlayHostActivity : ComponentActivity() {
         sink = renderer
         currentSurface?.let(::attachSurface)
         val media = CarPlayMediaEngine(renderer)
+        val pairings = AirPlayPersistence.loadPairings(this) { id, key ->
+            AirPlayPersistence.savePairing(this, id, key)
+        }
         val next = CarPlayController(
             context = this,
             config = config,
             airPlayConfig = airPlayConfig,
             identity = airPlayIdentity,
-            pairings = PairingStore(),
+            pairings = pairings,
             listener = object : AirPlaySessionListener {},
             media = media,
             reportStatus = { status -> setStatus(status.describe()) },

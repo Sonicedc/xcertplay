@@ -209,4 +209,6 @@ advertises the VPN link-local IPv6 endpoint in CarPlayStartSession and forwards 
 to the active `AirPlaySession`. `CarPlayHostActivity` is the full-screen launcher host with a
 `SurfaceView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. Deployment Apple/CH341 VID/PIDs and
 MFi transport identity are supplied through `CarPlayRuntimeConfig`; until those are configured the
-host reports a configuration status. This integration has not been hardware-verified.
+host reports a configuration status. The accessory Ed25519 identity and controller pairings are
+persisted through `AirPlayPersistence`, so a paired phone survives app restarts. This integration
+has not been hardware-verified.

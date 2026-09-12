@@ -566,11 +566,16 @@ removed to preserve the curated test count.
   and `CarPlayMediaEngine`, SurfaceView touch mapping through `CarPlayTouchMapper`, and VPN consent
   through `CarPlayVpnService.prepare`. It shows a deployment-configuration status until real
   VID/PIDs are supplied.
+- `AirPlayPersistence` stores the accessory Ed25519 identity and paired-controller long-term keys
+  in SharedPreferences, and `PairingStore` reports saves back to that store.
 
 This closes the previously missing host/orchestration seam. It does not prove that two Android
 USB connections can claim the USBMUX and NCM interfaces simultaneously, that the VPN link-local
 route matches the iPhone NCM neighbor discovery, or that any of the stages operate against real
-hardware. Opus decoding and Lockdown/AirPlay pairing persistence remain deferred.
+hardware. Opus decoding remains deferred: the wired reference path negotiates LPCM or AAC-LC, while
+Opus is the wireless low-latency format, so this gap does not block the wired direct-connect scope.
+Lockdown USB pairing records are still not persisted and therefore require a new trust dialog per
+device plug.
 
 ### Build and unit tests
 
@@ -583,3 +588,9 @@ $env:OS = "Windows_NT"
 ```
 
 `shared` keeps 6 permanent unit tests (0 failures / 0 errors).
+
+2026-09-12 Genymotion smoke: `mobile-debug.apk` installed on the documented emulator and
+`CarPlayHostActivity` launched as the launcher. The activity reached top resumed/focused state
+(PID 8842, displayed +376 ms) with no `FATAL EXCEPTION` or `AndroidRuntime` entries in logcat. This
+verifies only the host Activity/SurfaceView lifecycle on an emulator, not any USB, VPN, NCM,
+CarPlay, or MFi hardware behavior.
