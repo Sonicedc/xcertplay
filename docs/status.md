@@ -549,3 +549,37 @@ $env:OS = "Windows_NT"
 `shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary JVM test for avcC/hvcC
 config splitting, Annex B conversion, ADTS framing, and OpusHead construction passed and was then
 removed to preserve the curated test count.
+
+## Stage 8I: Wired integration (code complete, hardware unverified)
+
+- `CarPlayRuntimeConfig` is the deployment-owned identity boundary: measured Apple and CH341
+  VID/PID pairs, the NCM host MAC, the VPN link-local IPv6 literal, and the iAP2 identification
+  profile. There are still no built-in device IDs.
+- `MfiRuntime` runs the documented `0x10`/`0x11` probe and wraps the first responding coprocessor
+  as a `MfiAuthenticationClient`. `MfiSession` owns the backing I2C transport for shutdown.
+- `CarPlayController` drives the complete wired sequence on one worker executor: CH341 or board
+  I2C MFi discovery, iPhone USB permission and vendor-request re-enumeration, configuration 6,
+  USBMUX, Lockdown Pair, carkit TLS, iAP2 CSM, NCM data-path open, VPN attach, and the AirPlay
+  `7000` listener. It advertises `config.linkLocal` and `airPlayConfig.port` in the wired
+  CarPlayStartSession and forwards touch to the active `AirPlaySession`.
+- `CarPlayHostActivity` is the full-screen launcher host: a `SurfaceView` plus `AndroidMediaSink`
+  and `CarPlayMediaEngine`, SurfaceView touch mapping through `CarPlayTouchMapper`, and VPN consent
+  through `CarPlayVpnService.prepare`. It shows a deployment-configuration status until real
+  VID/PIDs are supplied.
+
+This closes the previously missing host/orchestration seam. It does not prove that two Android
+USB connections can claim the USBMUX and NCM interfaces simultaneously, that the VPN link-local
+route matches the iPhone NCM neighbor discovery, or that any of the stages operate against real
+hardware. Opus decoding and Lockdown/AirPlay pairing persistence remain deferred.
+
+### Build and unit tests
+
+2026-09-12 verified with Android Studio JBR 25 offline:
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+$env:OS = "Windows_NT"
+.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
+```
+
+`shared` keeps 6 permanent unit tests (0 failures / 0 errors).

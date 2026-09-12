@@ -162,5 +162,16 @@ CarPlay 的媒体/输入数据通道在 USBMUX/iAP2 控制通道之外，由 iPh
 The AirPlay session layer's MediaCodec/AudioTrack rendering seam is now filled by
 `AndroidMediaSink`, with `MediaCodecSupport` for avcC/hvcC, Annex B, RFC 3640 AAC/ADTS, and LPCM
 conversion, and `CarPlayTouchMapper` for SurfaceView touch forwarding. Opus decoding is skipped
-pending a native decoder. The full-screen host and the USB/NCM/iAP2 orchestration that feeds the
-sink are still unwired and remain hardware-unverified.
+pending a native decoder.
+
+## Wired integration (2026-09-12)
+
+`CarPlayController` now drives the complete wired sequence on one worker executor: MFi coprocessor
+discovery through CH341 or board I2C, iPhone USB permission and re-enumeration, configuration 6
+selection, USBMUX/Lockdown pairing, carkit TLS, iAP2 CSM control, NCM data-path open, VPN attach,
+and the AirPlay `7000` listener. It advertises the VPN link-local IPv6 endpoint in the wired
+CarPlayStartSession and forwards SurfaceView touch contacts to the active `AirPlaySession`.
+`CarPlayHostActivity` is the full-screen launcher host with a `SurfaceView`, `AndroidMediaSink`,
+and `CarPlayMediaEngine`. Deployment VID/PIDs are supplied in `CarPlayRuntimeConfig`; the activity
+shows a configuration status until the deployer provides the measured Apple/CH341 identities. The
+path remains hardware-unverified.

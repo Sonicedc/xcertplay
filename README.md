@@ -197,5 +197,16 @@ MediaCodec has no built-in Opus decoder; it remains a native-decoder gap. `CarPl
 turns Android MotionEvents into CarPlay touch contacts for `AirPlaySession.sendTouch`.
 
 This is the rendering component only. The full-screen SurfaceView host and the USB/NCM/iAP2
-orchestration that feeds it are still unwired, and the path has not been verified against an
-iPhone or vehicle head unit.
+orchestration that feeds it are now wired by `CarPlayHostActivity` and `CarPlayController`, and
+the path has not been verified against an iPhone or vehicle head unit.
+
+## Wired integration status
+
+`CarPlayController` sequences the complete wired path: MFi coprocessor discovery (CH341 USB or
+board I2C), iPhone USB permission and re-enumeration, configuration 6, USBMUX/Lockdown pairing,
+carkit TLS, iAP2 CSM control, NCM data-path open, VPN attach, and the AirPlay `7000` listener. It
+advertises the VPN link-local IPv6 endpoint in CarPlayStartSession and forwards SurfaceView touch
+to the active `AirPlaySession`. `CarPlayHostActivity` is the full-screen launcher host with a
+`SurfaceView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. Deployment Apple/CH341 VID/PIDs and
+MFi transport identity are supplied through `CarPlayRuntimeConfig`; until those are configured the
+host reports a configuration status. This integration has not been hardware-verified.
