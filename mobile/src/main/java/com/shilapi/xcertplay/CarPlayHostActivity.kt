@@ -9,7 +9,9 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +21,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayDisplayConfig
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
+import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.CarPlayMediaEngine
 import com.shilapi.xcertplay.media.AndroidMediaSink
@@ -38,8 +41,7 @@ import java.util.Locale
  * Full-screen CarPlay host. It renders decoded video through a [SurfaceView], forwards touch to
  * the active AirPlay session, and drives the complete wired bring-up through [CarPlayController].
  *
- * A deployment must replace [runtimeConfig] with the real Apple and CH341 USB identities measured
- * on the target unit. Until then the activity shows a status overlay and the stack stays inert.
+ * Apple devices are discovered by vendor ID; CH341 uses the configured VID/PID below.
  */
 class CarPlayHostActivity : ComponentActivity() {
     private val airPlayConfig = AirPlayConfig(
@@ -72,6 +74,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private var surfaceView: SurfaceView? = null
     private var statusView: TextView? = null
+    private var reconnectButtons: View? = null
     private var sink: AndroidMediaSink? = null
     private var controller: CarPlayController? = null
     private var currentSurface: Surface? = null
@@ -140,10 +143,39 @@ class CarPlayHostActivity : ComponentActivity() {
             Gravity.BOTTOM or Gravity.START,
         )
         statusParams.setMargins(dp(12), 0, dp(12), dp(12))
+
+        val reconnect = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val mfiButton = Button(this).apply {
+            text = "Reconnect MFi"
+            setOnClickListener {
+                appendLog("Reconnect MFi requested")
+                controller?.reconnectMfi()
+            }
+        }
+        val iphoneButton = Button(this).apply {
+            text = "Reconnect iPhone"
+            setOnClickListener {
+                appendLog("Reconnect iPhone requested")
+                controller?.reconnectIphone()
+            }
+        }
+        reconnect.addView(mfiButton)
+        reconnect.addView(iphoneButton)
+        val reconnectParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START,
+        )
+        reconnectParams.setMargins(dp(12), dp(12), 0, 0)
+
         root.addView(surface)
         root.addView(log, statusParams)
+        root.addView(reconnect, reconnectParams)
         surfaceView = surface
         statusView = log
+        reconnectButtons = reconnect
         return root
     }
 
@@ -163,7 +195,21 @@ class CarPlayHostActivity : ComponentActivity() {
             airPlayConfig = airPlayConfig,
             identity = airPlayIdentity,
             pairings = pairings,
-            listener = object : AirPlaySessionListener {},
+            listener = object : AirPlaySessionListener {
+                override fun onSessionActive(session: AirPlaySession) {
+                    runOnUiThread {
+                        appendLog("AirPlay session active")
+                        reconnectButtons?.visibility = View.GONE
+                    }
+                }
+
+                override fun onSessionEnded(session: AirPlaySession) {
+                    runOnUiThread {
+                        appendLog("AirPlay session ended")
+                        reconnectButtons?.visibility = View.VISIBLE
+                    }
+                }
+            },
             media = media,
             reportStatus = { status -> setStatus(status.describe()) },
             loadPairRecord = { AirPlayPersistence.loadLockdownRecord(this) },

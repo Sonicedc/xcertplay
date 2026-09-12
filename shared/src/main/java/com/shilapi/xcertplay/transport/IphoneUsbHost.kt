@@ -22,22 +22,34 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Exact Apple USB identities allowed by the deployment configuration. */
-class IphoneUsbMatcher(allowedDevices: Collection<UsbDeviceId>) {
-    private val allowedDevices = allowedDevices.toSet()
+class IphoneUsbMatcher private constructor(
+    private val allowedDevices: Set<UsbDeviceId>?,
+    private val allowAnyAppleProduct: Boolean,
+) {
+    constructor(allowedDevices: Collection<UsbDeviceId>) : this(
+        allowedDevices.toSet(),
+        allowAnyAppleProduct = false,
+    )
 
     init {
-        require(allowedDevices.isNotEmpty()) { "At least one iPhone USB identity is required" }
-        require(allowedDevices.all { it.vendorId == APPLE_VENDOR_ID }) {
+        require(allowedDevices == null || allowedDevices.isNotEmpty()) {
+            "At least one iPhone USB identity is required when not using Apple-vendor discovery"
+        }
+        require(allowedDevices == null || allowedDevices.all { it.vendorId == APPLE_VENDOR_ID }) {
             "iPhone USB identities must use Apple vendor ID 0x${APPLE_VENDOR_ID.toString(16)}"
         }
     }
 
     fun matches(vendorId: Int, productId: Int): Boolean =
-        UsbDeviceId(vendorId, productId) in allowedDevices
+        if (allowAnyAppleProduct) vendorId == APPLE_VENDOR_ID
+        else UsbDeviceId(vendorId, productId) in allowedDevices.orEmpty()
 
     companion object {
         /** Apple VID used by LIVI commit 0a3dcaa0bf30d5319506d0e47c7b0d46bc942ec3. */
         const val APPLE_VENDOR_ID = 0x05ac
+
+        /** Discovers every Apple device, matching only the vendor ID confirmed by LIVI. */
+        fun appleVendor(): IphoneUsbMatcher = IphoneUsbMatcher(null, allowAnyAppleProduct = true)
     }
 }
 

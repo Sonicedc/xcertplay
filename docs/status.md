@@ -567,7 +567,9 @@ removed to preserve the curated test count.
   through `CarPlayVpnService.prepare`. The bundled runtime config names the CH341
   `VID_1A86&PID_5512&REV_0304` bridge, declares a matching `usb-device` filter, requests USB
   permission, and claims the CH341 interface for exclusive use. A timestamped log panel in the
-  bottom-left shows each stage; the iPhone USB identity remains deployer-supplied.
+  bottom-left shows each stage. iPhones are discovered by Apple vendor ID `0x05AC` rather than a
+  fixed product ID, and Reconnect MFi / Reconnect iPhone buttons re-run those stages while no
+  session is active.
 - `AirPlayPersistence` stores the accessory Ed25519 identity and paired-controller long-term keys
   in SharedPreferences, and `PairingStore` reports saves back to that store.
 - The Lockdown USB PairRecord (host/root/device PEM material, HostID, SystemBUID, and WiFi MAC) is

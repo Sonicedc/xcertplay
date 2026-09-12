@@ -86,19 +86,20 @@ class CarPlayController(
 
     private val appContext = context.applicationContext
     private val usbManager = context.getSystemService(UsbManager::class.java)
-    private val iphoneHost: IphoneUsbHost? = if (config.iphoneDevices.isNotEmpty()) {
-        IphoneUsbHost(
-            appContext,
-            usbManager,
-            IphoneUsbMatcher(config.iphoneDevices),
-        )
-    } else {
-        null
-    }
+    private val iphoneHost = IphoneUsbHost(
+        appContext,
+        usbManager,
+        if (config.iphoneDevices.isNotEmpty()) {
+            IphoneUsbMatcher(config.iphoneDevices)
+        } else {
+            IphoneUsbMatcher.appleVendor()
+        },
+    )
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val hostId = UUID.randomUUID().toString()
     private val systemBuid = randomHex(20)
+    private val lifecycleLock = Any()
 
     @Volatile private var closed = false
     @Volatile private var phase = Phase.IDLE
@@ -151,11 +152,26 @@ class CarPlayController(
         synchronized(this) {
             if (closed) return
         }
-        iphoneHost?.let {
-            permissionCloseable = it.registerPermissionReceiver(::onIphonePermission)
-            attachCloseable = it.registerAttachReceiver(::onIphoneAttached)
-        }
+        permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
+        attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
         startMfi()
+    }
+
+    /** Reopens the CH341/MFi path without restarting the app. */
+    fun reconnectMfi() = synchronized(lifecycleLock) {
+        if (closed) return
+        closeMfiSession()
+        startMfi()
+    }
+
+    /** Re-runs iPhone discovery/bring-up using the already-open MFi session. */
+    fun reconnectIphone() = synchronized(lifecycleLock) {
+        if (closed) return
+        if (mfiSession == null) {
+            startMfi()
+        } else {
+            startIphone()
+        }
     }
 
     fun sendTouch(contacts: List<AirPlayContact>) {
@@ -265,13 +281,9 @@ class CarPlayController(
     private fun startIphone() {
         phase = Phase.IPHONE
         onStatus(CarPlayStatus.DiscoveringIphone)
-        if (iphoneHost == null) {
-            onStatus(CarPlayStatus.Failed("No configured iPhone USB identity; CH341/MFi stays active"))
-            return
-        }
         val device = iphoneHost.discover().firstOrNull()
         if (device == null) {
-            onStatus(CarPlayStatus.Failed("No configured iPhone USB device found"))
+            onStatus(CarPlayStatus.Failed("No Apple USB device found; CH341/MFi stays active"))
         } else {
             requestIphonePermission(device)
         }
@@ -284,7 +296,7 @@ class CarPlayController(
     private fun doRequestIphonePermission(device: UsbDevice) {
         if (closed) return
         try {
-            when (val request = iphoneHost!!.requestPermission(device)) {
+            when (val request = iphoneHost.requestPermission(device)) {
                 is IphoneUsbHost.PermissionRequest.AlreadyGranted ->
                     onIphonePermission(IphoneUsbHost.PermissionResult.Granted(request.device))
                 is IphoneUsbHost.PermissionRequest.Requested ->
@@ -308,7 +320,7 @@ class CarPlayController(
     private fun beginReenumeration(device: UsbDevice) {
         phase = Phase.REENUMERATION
         onStatus(CarPlayStatus.SelectingConfiguration)
-        iphoneHost!!.requestCarPlayReenumerationAsync(device, executor) { transition ->
+        iphoneHost.requestCarPlayReenumerationAsync(device, executor) { transition ->
             when (transition) {
                 IphoneUsbHost.TransitionResult.ReenumerationRequested ->
                     onStatus(CarPlayStatus.WaitingForReenumeration)
@@ -329,7 +341,7 @@ class CarPlayController(
     private fun selectConfiguration(device: UsbDevice) {
         phase = Phase.CONFIGURING
         onStatus(CarPlayStatus.SelectingConfiguration)
-        iphoneHost!!.selectCarPlayConfigurationAsync(device, executor) { transition ->
+        iphoneHost.selectCarPlayConfigurationAsync(device, executor) { transition ->
             when (transition) {
                 IphoneUsbHost.TransitionResult.CarPlayConfigurationSelected -> openDataPaths(device)
                 IphoneUsbHost.TransitionResult.ReenumerationRequested -> Unit
@@ -341,7 +353,7 @@ class CarPlayController(
     private fun openDataPaths(device: UsbDevice) {
         phase = Phase.DATAPATHS
         onStatus(CarPlayStatus.OpeningDataPaths)
-        iphoneHost!!.openIap2UsbSessionAsync(device, executor) { result ->
+        iphoneHost.openIap2UsbSessionAsync(device, executor) { result ->
             when (result) {
                 is IphoneUsbHost.Iap2SessionResult.Connected -> {
                     try {
@@ -514,6 +526,20 @@ class CarPlayController(
         permissionCloseable = null
         attachCloseable = null
         ch341PermissionCloseable = null
+    }
+
+    private fun closeMfiSession() {
+        val session = mfiSession
+        mfiSession = null
+        if (session != null) {
+            executor.execute {
+                try {
+                    session.close()
+                } catch (_: Exception) {
+                    // Best effort.
+                }
+            }
+        }
     }
 
     private fun fail(error: Throwable) {

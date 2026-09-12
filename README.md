@@ -209,7 +209,9 @@ advertises the VPN link-local IPv6 endpoint in CarPlayStartSession and forwards 
 to the active `AirPlaySession`. `CarPlayHostActivity` is the full-screen launcher host with a
 `SurfaceView`, `AndroidMediaSink`, and `CarPlayMediaEngine`. The bundled host configures the CH341
 `VID_1A86&PID_5512` bridge, requests USB permission and claims its interface, and shows a live
-bottom-left log of every bring-up stage; the iPhone USB identity remains deployer-supplied. The
+bottom-left log of every bring-up stage. iPhones are discovered by Apple vendor ID `0x05AC`
+instead of a hardcoded product ID, and Reconnect MFi / Reconnect iPhone buttons re-run those
+bring-up stages while no session is active. The
 accessory Ed25519 identity and controller pairings are persisted through `AirPlayPersistence`, and
 the Lockdown USB PairRecord is reused across reconnects, so a trusted phone survives app restarts
 without a new trust dialog. This integration has not been hardware-verified.
