@@ -402,3 +402,46 @@ $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 
 `shared` 保持 6 个关键永久单测（0 failures / 0 errors）。该结果只验证 Kotlin 逻辑与 APK 可构建，
 不构成任何 NCM、USB、iPhone 或 CarPlay 实机验证。
+
+## Stage 8E: AirPlay pairing core (code complete, hardware unverified)
+
+- `AirPlayCrypto` wraps BouncyCastle `bcprov-jdk18on:1.79` for the CarPlay pairing handshake:
+  X25519, Ed25519, HKDF-SHA512, SHA-512, and ChaCha20-Poly1305 (IETF 96-bit nonce), plus the
+  AirPlay nonce helpers (`nonce64`, `nonceLabel`).
+- `Tlv8Codec` implements the HomeKit/AirPlay TLV8 wire format with 255-byte fragmentation and the
+  same-type separator.
+- `Srp6a` implements the SRP-6a server for the fixed "Pair-Setup"/"3939" PIN over the RFC 5054
+  3072-bit group and SHA-512.
+- `PairSetup` performs unauthenticated pair-setup (M1-M6): SRP-6a proof exchange followed by
+  encrypted long-term Ed25519 key exchange, persisting the controller LTPK in a `PairingStore`.
+- `PairVerify` performs pair-verify (M1-M4): ephemeral X25519 plus Ed25519 signature against the
+  stored controller LTPK, then derives the per-direction control-channel keys.
+- `ControlCipher` frames the post-pair-verify control channel as 2-byte little-endian length,
+  ciphertext, and 16-byte tag, with the length header as AEAD associated data.
+- `RtspMessage` incrementally parses RTSP/HTTP-style requests and builds responses for the future
+  TCP :7000 session.
+- `MfiSapAuthSetup` implements the LIVI /auth-setup MFiSAP responder: ephemeral X25519, AES-128-CTR
+  encryption under SHA-1("AES-KEY"/"AES-IV", shared), the MFi certificate, and the coprocessor
+  signature (SHA-1 for protocol major 2, SHA-256 otherwise). It calls the blocking
+  `MfiAuthenticationClient` and must run off the main thread.
+- `AirPlayIdentity` and `PairingStore` are plain in-memory Kotlin models; persistence wiring is
+  deferred to the session layer.
+
+This is the pairing/control protocol core. It does not own a TCP :7000 listener, `/info`,
+SETUP/RECORD stream handling, or media/input transport, and it has not been verified against an
+iPhone or vehicle head unit. JCA/Android runtime behavior on the project's minSdk 29 has not been
+device-verified; BouncyCastle is bundled for the X25519/Ed25519 primitives.
+
+### Build and unit tests
+
+2026-09-12 verified with Android Studio JBR 25 offline:
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
+```
+
+`shared` keeps 6 permanent unit tests (0 failures / 0 errors). A temporary JVM test exercising the
+SRP client/server handshake, the full pair-setup/pair-verify round trip, the control-cipher round
+trip, and the RFC 8439 ChaCha20-Poly1305 and RFC 7748 X25519 vectors passed and was then removed
+to preserve the curated test count.

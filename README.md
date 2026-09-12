@@ -150,3 +150,17 @@ and the USB 512-byte short-packet pad. `NcmFunctionDiscovery` reads the NCM cont
 This is the NCM data-path seam only. It does not create an Android network interface or VPN
 tunnel, does not run an AirPlay receiver, and has not been verified against an iPhone or a vehicle
 head unit.
+
+## AirPlay pairing core status
+
+`AirPlayCrypto` adds BouncyCastle-backed X25519, Ed25519, HKDF-SHA512, SHA-512, and
+ChaCha20-Poly1305 primitives plus the AirPlay nonce helpers. `Tlv8Codec` handles the pairing TLV8
+wire format, `Srp6a` runs the fixed "Pair-Setup"/"3939" SRP-6a server, and `PairSetup`,
+`PairVerify`, `ControlCipher`, and `RtspMessage` implement the accessory-side pairing, encrypted
+control framing, and request parsing/response building. `MfiSapAuthSetup` builds the /auth-setup
+response from the existing MFi coprocessor client. `AirPlayIdentity` and `PairingStore` are
+in-memory models awaiting the session layer for persistence.
+
+This is the pairing/control protocol core. It does not open the TCP :7000 RTSP receiver, serve
+`/info`, or move SETUP/RECORD media streams, and it has not been verified against an iPhone or
+vehicle head unit.

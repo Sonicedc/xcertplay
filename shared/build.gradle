@@ -34,5 +34,6 @@ android {
 }
 dependencies {
     implementation libs.androidx.app
+    implementation libs.bouncycastle
     testImplementation libs.junit
 }
