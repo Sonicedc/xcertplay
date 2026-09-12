@@ -370,3 +370,35 @@ USB、I2C 或 MFi 实机链路已验证。
 ## TLS runtime probe (2026-09-11)
 
 - The specified Genymotion device `192.168.56.101:5555` is Android 13/API 33, not API 29: with a temporary fake PKCS#1 RSA device key, the `LockdownPairRecordGenerator` root certificate (empty issuer/subject DN) and `CN=Device` device certificate both parsed in `AndroidOpenSSL` CertificateFactory; root self-verification and device verification with the root public key succeeded, and the PKCS#8 host key plus root certificate initialized `HarmonyJSSE` PKIX KeyManager, `AndroidOpenSSL` SSLContext, and `Java8EngineWrapper` SSLEngine. The custom X509Certificate/KeyManager fallback was therefore not run; this remains no API 29 evidence and predates validation of the production TLS channel.
+
+## Stage 8D: LIVI-minimal USB NCM transport (code complete, hardware unverified)
+
+- `Ntb16Codec` implements only the NTB16 layout used by LIVI `iap2-usbmux/src/ntb.rs`: one NTH16
+  header, one NDP16 table with one datagram, little-endian u16 fields, and a zero pad byte when a
+  block would end exactly on a 512-byte USB packet boundary. There is no NTB32, alignment, CRC, or
+  NCM control-plane request handling.
+- `NcmFunctionDiscovery` finds the NCM control interface (class `0x02`, subclass `0x0D`) and the
+  data-class interface (class `0x0A`) with one bulk IN and one bulk OUT, preferring data alternate
+  setting 1 as LIVI selects.
+- `NcmUsbBridge` claims the control/data interfaces on a caller-opened connection, activates the
+  data alternate setting, and exposes blocking Ethernet-frame `send`/`recv` that frame and
+  reassemble NTB16 blocks. It owns and closes that connection.
+- `EthernetIpv6Codec` strips or restores an untagged Ethernet II header around IPv6 payloads as the
+  seam for a future Android VPN-backed IPv6 endpoint.
+
+This is the NCM data-path seam only. It does not create an Android network interface or VPN tunnel,
+does not run an AirPlay receiver or media session, and has not been verified against an iPhone or
+vehicle head unit. The wired control client still advertises an endpoint only when the caller can
+supply a real IPv6 endpoint and port.
+
+### Build and unit tests
+
+2026-09-12 已使用 Android Studio JBR 25 离线强制重跑并通过：
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug --offline --rerun-tasks
+```
+
+`shared` 保持 6 个关键永久单测（0 failures / 0 errors）。该结果只验证 Kotlin 逻辑与 APK 可构建，
+不构成任何 NCM、USB、iPhone 或 CarPlay 实机验证。

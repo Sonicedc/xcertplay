@@ -25,7 +25,7 @@
 | MFi 认证 | 部分实现（实机未验证） | 已有 certificate 读取和 digest 签名寄存器编排；尚未接入或验证真实 CH341、MFi 芯片与板载 I2C |
 | iPhone USBMUX / Lockdown / carkit stream | 代码已实现（实机未验证） | 已有至 `62078` 的 USBMUX TCP、GetValue/Pair、TLS StartSession、`com.apple.carkit.service` StartService 及服务字节流；不包含 iAP2 或媒体会话 |
 | Lockdown 配对材料 | 代码已实现（仅内存） | `LockdownPairingClient` 取得 DevicePublicKey 与 WiFiAddress，生成 PairRecord 并处理 Pair；成功的 record/可选 EscrowBag 不持久化 |
-| CarPlay 协议栈 | 部分实现（实机未验证） | 已有纯 sans-I/O iAP2 链路、CSM MFi 与 wired 控制消息顺序；尚无 NCM、AirPlay、视频、音频或触控链路 |
+| CarPlay 协议栈 | 部分实现（实机未验证） | 已有纯 sans-I/O iAP2 链路、CSM MFi 与 wired 控制消息顺序，以及按 LIVI 最小实现的 NTB16/以太网帧层；尚无 Android 网络接口、AirPlay、视频、音频或触控链路 |
 | 真车机硬件联调 | 未实现 | 需要支持 USB Host 的物理 Android 设备 |
 
 mobile 入口提供板载 I2C 诊断，不是 CarPlay 实现：它只对手动指定的 `/dev/i2c-N` 执行 MFi 自检。
@@ -138,3 +138,15 @@ It forwards received control updates and answers every `4300` with a wired `4301
 caller has supplied a real IPv6 literal, AirPlay port, public key, and source version. This is
 control-plane code only: it does not create USB NCM or an AirPlay receiver, and it has not been
 verified with an iPhone or vehicle hardware.
+
+## USB NCM transport status
+
+`Ntb16Codec` is a LIVI-minimal NTB16 codec: one NTH16 header, one NDP16 table with one datagram,
+and the USB 512-byte short-packet pad. `NcmFunctionDiscovery` reads the NCM control interface
+(class `0x02`, subclass `0x0D`) and data interface (class `0x0A`, alternate setting 1) descriptors;
+`NcmUsbBridge` claims both interfaces and moves Ethernet frames over the bulk endpoints.
+`EthernetIpv6Codec` strips or restores an untagged Ethernet II header around IPv6 payloads.
+
+This is the NCM data-path seam only. It does not create an Android network interface or VPN
+tunnel, does not run an AirPlay receiver, and has not been verified against an iPhone or a vehicle
+head unit.

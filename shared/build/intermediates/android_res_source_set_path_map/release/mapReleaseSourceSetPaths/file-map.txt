@@ -1,9 +1,0 @@
-com.shilapi.xcertplay.shared-pngs-0 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\build\generated\res\pngs\release
-com.shilapi.xcertplay.shared-updated_navigation_xml-1 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\build\generated\updated_navigation_xml\release
-com.shilapi.xcertplay.shared-mergeReleaseResources-2 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
-com.shilapi.xcertplay.shared-mergeReleaseResources-3 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
-com.shilapi.xcertplay.shared-release-4 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\build\intermediates\merged_res\release\mergeReleaseResources
-com.shilapi.xcertplay.shared-release-5 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\build\intermediates\packaged_res\release\packageReleaseResources
-com.shilapi.xcertplay.shared-main-6 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\src\main\res
-com.shilapi.xcertplay.shared-release-7 C:\Users\shila\Desktop\carplay-apk-on-ch341\shared\src\release\res
-gradleHome-0 C:\Users\shila\.gradle
