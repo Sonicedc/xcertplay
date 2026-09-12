@@ -254,6 +254,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun CarPlayStatus.describe(): String = when (this) {
         CarPlayStatus.DiscoveringMfi -> "Discovering MFi coprocessor"
         CarPlayStatus.RequestingMfiPermission -> "Requesting MFi USB permission"
+        CarPlayStatus.MfiReady -> "MFi coprocessor ready"
         CarPlayStatus.DiscoveringIphone -> "Discovering iPhone"
         CarPlayStatus.RequestingIphonePermission -> "Requesting iPhone USB permission"
         CarPlayStatus.WaitingForReenumeration -> "Waiting for iPhone re-enumeration"

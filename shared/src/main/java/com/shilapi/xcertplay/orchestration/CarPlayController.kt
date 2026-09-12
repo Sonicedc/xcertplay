@@ -50,6 +50,7 @@ import java.util.concurrent.TimeUnit
 sealed class CarPlayStatus {
     data object DiscoveringMfi : CarPlayStatus()
     data object RequestingMfiPermission : CarPlayStatus()
+    data object MfiReady : CarPlayStatus()
     data object DiscoveringIphone : CarPlayStatus()
     data object RequestingIphonePermission : CarPlayStatus()
     data object WaitingForReenumeration : CarPlayStatus()
@@ -227,6 +228,7 @@ class CarPlayController(
                 val transport = LinuxI2cTransport.open(config.linuxI2cPath!!)
                 try {
                     mfiSession = MfiSession(MfiRuntime.scan(transport), transport)
+                    onStatus(CarPlayStatus.MfiReady)
                     startIphone()
                 } catch (error: Throwable) {
                     transport.close()
@@ -267,6 +269,7 @@ class CarPlayController(
                     try {
                         val transport = Ch341I2cTransport(session)
                         mfiSession = MfiSession(MfiRuntime.scan(transport), session)
+                        onStatus(CarPlayStatus.MfiReady)
                         startIphone()
                     } catch (error: Throwable) {
                         session.close()
@@ -283,7 +286,11 @@ class CarPlayController(
         onStatus(CarPlayStatus.DiscoveringIphone)
         val device = iphoneHost.discover().firstOrNull()
         if (device == null) {
-            onStatus(CarPlayStatus.Failed("No Apple USB device found; CH341/MFi stays active"))
+            onStatus(
+                CarPlayStatus.Failed(
+                    "No Apple USB device on host bus; check data cable/port/power. CH341/MFi stays active",
+                ),
+            )
         } else {
             requestIphonePermission(device)
         }

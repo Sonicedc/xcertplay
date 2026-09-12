@@ -604,3 +604,15 @@ CarPlay, or MFi hardware behavior.
 log panel at bounds `[30,840][2277,1050]` containing the bundled `CH341 1A86:5512` startup line and
 the expected emulator result `Failed: No configured CH341 USB device found`. This confirms the
 config, USB-filter manifest merge, and live log rendering, not physical CH341 ownership.
+
+## Test-unit field diagnosis (Pixel 3, 2026-09-12)
+
+- `10.0.100.238` (Pixel 3, Android 11/API 30) is reachable over adb after wireless pairing; the
+  current service port is discovered through `adb mdns services`.
+- `dumpsys usb` shows the CH341 at `/dev/bus/usb/001/006` as `VID_1A86/PID_5512` revision 3.04,
+  with the app granted device permission. The host also enumerates the hub billboard, a Realtek
+  LAN, and USB storage.
+- The app log reaches `MFi coprocessor ready`, so CH341 ownership and the MFi I2C probe succeed.
+  iPhone discovery then fails because no Apple `vendor_id=1408` device is present on the USB host
+  bus; a 60-second hot-plug watch saw no Apple enumeration event. The remaining blocker is the
+  iPhone's physical data connection (data-capable port/cable and hub power), not app logic.
