@@ -288,25 +288,31 @@ object AirPlayPersistence {
         activityWidthPixels: Int,
         activityHeightPixels: Int,
         rect: SafeAreaRect,
+        commit: Boolean = false,
     ) {
         require(activityWidthPixels > 0 && activityHeightPixels > 0) {
             "Activity dimensions must be positive"
         }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(
                 safeAreaKey(activityWidthPixels, activityHeightPixels),
                 SafeAreaCodec.encode(rect.clampTo(activityWidthPixels, activityHeightPixels)),
             )
-            .apply()
+        if (commit) editor.commit() else editor.apply()
     }
 
-    fun clearSafeAreaRect(context: Context, activityWidthPixels: Int, activityHeightPixels: Int) {
+    fun clearSafeAreaRect(
+        context: Context,
+        activityWidthPixels: Int,
+        activityHeightPixels: Int,
+        commit: Boolean = false,
+    ) {
         require(activityWidthPixels > 0 && activityHeightPixels > 0) {
             "Activity dimensions must be positive"
         }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .remove(safeAreaKey(activityWidthPixels, activityHeightPixels))
-            .apply()
+        if (commit) editor.commit() else editor.apply()
     }
 
     fun loadCustomAirPlayIconFile(context: Context): File? =
