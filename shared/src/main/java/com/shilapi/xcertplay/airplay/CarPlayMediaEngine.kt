@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.airplay
 
 import android.util.Log
 import java.io.Closeable
+import java.io.File
 import java.math.BigInteger
 import java.util.concurrent.ConcurrentHashMap
 
@@ -27,6 +28,7 @@ interface MediaSink {
 class CarPlayMediaEngine(
     private val sink: MediaSink,
     private val microphoneEnabled: Boolean = false,
+    private val audioCaptureDirectory: File? = null,
 ) : AirPlayMediaHandler {
     private data class AudioMeta(
         val type: Int,
@@ -40,6 +42,7 @@ class CarPlayMediaEngine(
     private val streams = ConcurrentHashMap<Int, Closeable>()
     private val audioMeta = ConcurrentHashMap<Int, AudioMeta>()
     private val pendingMicrophone = ConcurrentHashMap<Int, MicrophoneConfig>()
+    private val audioCaptures = ConcurrentHashMap<Int, AudioPacketCapture>()
 
     override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int? {
         val key = outputKey(session, stream) ?: return null
@@ -68,6 +71,7 @@ class CarPlayMediaEngine(
     override fun onAudio(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Map<String, Any?>? {
         streams.remove(type)?.close()
         audioMeta.remove(type)
+        audioCaptures.remove(type)?.close()
         if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
         sink.onAudioStopped(type)
 
@@ -90,7 +94,9 @@ class CarPlayMediaEngine(
         val microphone = microphoneConfig(session, type, stream, format)
         if (microphone != null) pendingMicrophone[type] = microphone
 
-        val audio = AudioStream(key)
+        val capture = audioCaptureDirectory?.let { AudioPacketCapture(it, type) }
+        if (capture != null) audioCaptures[type] = capture
+        val audio = AudioStream(key, type)
         val (dataPort, controlPort) = audio.listen(
             object : AudioStream.Listener {
                 override fun onStarted(firstSample: Int) {
@@ -102,6 +108,15 @@ class CarPlayMediaEngine(
 
                 override fun onRtp(rtp: ByteArray, sample: Int) =
                     sink.onAudioRtp(type, format, rtp, sample)
+
+                override fun onPacket(
+                    wire: ByteArray,
+                    rtp: ByteArray?,
+                    sample: Int?,
+                    error: Throwable?,
+                ) {
+                    capture?.record(wire, rtp, sample, error)
+                }
             },
         )
         streams[type] = audio
@@ -172,6 +187,7 @@ class CarPlayMediaEngine(
     override fun onTeardown(session: AirPlaySession, type: Int) {
         if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
         audioMeta.remove(type)
+        audioCaptures.remove(type)?.close()
         sink.onAudioStopped(type)
         streams.remove(type)?.close()
         if (isScreenStreamType(type)) sink.onScreenStreamActive(type, false)
@@ -185,6 +201,8 @@ class CarPlayMediaEngine(
         streams.clear()
         audioMeta.clear()
         pendingMicrophone.clear()
+        audioCaptures.values.forEach(AudioPacketCapture::close)
+        audioCaptures.clear()
     }
 
     private fun outputKey(session: AirPlaySession, stream: Map<String, Any?>): ByteArray? {
@@ -199,19 +217,23 @@ class CarPlayMediaEngine(
     ): MicrophoneConfig? {
         if (!microphoneEnabled || type != STREAM_TYPE_MAIN_AUDIO) return null
         if (format.audioType != "telephony" && format.audioType != "speechrecognition") return null
-        if (format.codec == AudioCodecKind.OPUS) {
-            Log.w(TAG, "microphone uplink does not support the negotiated Opus format")
-            return null
-        }
         val port = (stream["dataPort"] as? Number)?.toInt() ?: return null
         if (port !in 1..65535) return null
         val host = session.remoteAddress ?: return null
         val key = dataStreamKey(session, stream, DATASTREAM_INPUT_KEY) ?: return null
+        val formatBits = (stream["audioFormat"] as? Number)?.toLong() ?: 0L
         val framesPerPacket = (stream["framesPerPacket"] as? Number)?.toInt() ?: 0
-        val frameMillis = if (framesPerPacket > 0) {
+        val frameMillis = if (format.codec == AudioCodecKind.OPUS) {
+            20
+        } else if (framesPerPacket > 0) {
             Math.round(framesPerPacket * 1000.0 / format.sampleRate).toInt().coerceIn(5, 60)
         } else {
             20
+        }
+        val opusBitrate = when {
+            formatBits and OPUS_48K != 0L -> 96_000
+            formatBits and OPUS_24K != 0L -> 64_000
+            else -> 48_000
         }
         return MicrophoneConfig(
             audioType = format.audioType,
@@ -222,6 +244,8 @@ class CarPlayMediaEngine(
             host = host,
             port = port,
             key = key,
+            codec = format.codec,
+            bitrate = if (format.codec == AudioCodecKind.OPUS) opusBitrate else null,
         )
     }
 
@@ -252,6 +276,8 @@ class CarPlayMediaEngine(
         const val DATASTREAM_OUTPUT_KEY = "DataStream-Output-Encryption-Key"
         const val DATASTREAM_INPUT_KEY = "DataStream-Input-Encryption-Key"
         const val IAP_DATASTREAM_UUID = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2"
+        const val OPUS_24K = 0x20000000L
+        const val OPUS_48K = 0x40000000L
     }
 }
 

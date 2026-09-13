@@ -13,6 +13,7 @@ import com.shilapi.xcertplay.airplay.AudioFormat
 import com.shilapi.xcertplay.airplay.MediaSink
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.VideoCodec
+import com.shilapi.xcertplay.airplay.toHexString
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
@@ -68,7 +69,7 @@ class AndroidMediaSink(
     }
 
     override fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {
-        audioRenderer(type, format).submit(rtp)
+        audioRenderer(type, format).submit(rtp, sample)
     }
 
     override fun onAudioStopped(type: Int) {
@@ -338,7 +339,9 @@ private fun MediaFormat.intOrNull(key: String): Int? =
 
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
 private class AudioRenderer(val format: AudioFormat) : Closeable {
-    private val queue = LinkedBlockingQueue<ByteArray>(MAX_QUEUED_PACKETS)
+    private data class AudioPacket(val rtp: ByteArray, val sample: Int)
+
+    private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
     @Volatile private var running = true
     @Volatile private var started = false
     private var codec: MediaCodec? = null
@@ -349,6 +352,13 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
     private var startThresholdBytes = 0
     private var fadeApplied = false
     private var droppedPacketsLogged = false
+    private var firstAacPayloadLogged = false
+    private var firstOpusShortPacketLogged = false
+    private var firstInputQueuedLogged = false
+    private var inputQueued = 0
+    private var inputDropped = 0
+    private var outputBuffers = 0
+    private var firstPcmLogged = false
     private val thread = Thread(::run, "carplay-audio").apply { isDaemon = true }
 
     fun start() {
@@ -357,8 +367,8 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
         thread.start()
     }
 
-    fun submit(rtp: ByteArray) {
-        if (!started || !queue.offer(rtp)) {
+    fun submit(rtp: ByteArray, sample: Int) {
+        if (!started || !queue.offer(AudioPacket(rtp, sample))) {
             if (started && !droppedPacketsLogged) {
                 droppedPacketsLogged = true
                 Log.w(TAG, "audio queue full; dropping newest packets to bound latency")
@@ -397,16 +407,28 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
             if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
                 setInteger(MediaFormat.KEY_IS_ADTS, 1)
+                setByteBuffer("csd-0", ByteBuffer.wrap(aacAudioSpecificConfig()))
             } else {
                 setByteBuffer("csd-0", ByteBuffer.wrap(opusHead()))
+                setByteBuffer("csd-1", ByteBuffer.wrap(opusCodecDelay()))
+                setByteBuffer("csd-2", ByteBuffer.wrap(opusSeekPreRoll()))
             }
+        }
+        if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
+            Log.i(
+                TAG,
+                "audio AAC config rate=${format.sampleRate} channels=${format.channels} " +
+                    "csd0=${aacAudioSpecificConfig().toHexString()}",
+            )
         }
         codec = try {
             MediaCodec.createDecoderByType(mime).also {
                 it.configure(mediaFormat, null, null, 0)
                 it.start()
+                Log.i(TAG, "audio decoder configured mime=$mime name=${it.name}")
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.e(TAG, "audio decoder configuration failed mime=$mime", error)
             null
         }
     }
@@ -446,28 +468,34 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
         )
     }
 
+    private fun aacAudioSpecificConfig(): ByteArray {
+        val frequencyIndex = MediaCodecSupport.aacFrequencyIndex(format.sampleRate)
+        val value = (AAC_OBJECT_TYPE_LC shl 11) or
+            (frequencyIndex shl 7) or
+            (format.channels.coerceIn(1, 7) shl 3)
+        return byteArrayOf((value ushr 8).toByte(), value.toByte())
+    }
+
     private fun audioAttributes(): AudioAttributes {
-        val usage: Int
-        val contentType: Int
-        when {
-            format.audioType == "telephony" || format.audioType == "speechrecognition" -> {
-                usage = AudioAttributes.USAGE_VOICE_COMMUNICATION
-                contentType = AudioAttributes.CONTENT_TYPE_SPEECH
+        val usage = when (format.audioType.lowercase()) {
+            "telephony" -> AudioAttributes.USAGE_VOICE_COMMUNICATION
+            "speechrecognition" -> AudioAttributes.USAGE_ASSISTANT
+            "media" -> AudioAttributes.USAGE_MEDIA
+            "default", "alert", "compatibility" ->
+                AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
+            else -> if (format.payloadType == STREAM_TYPE_MAIN_HIGH_AUDIO) {
+                AudioAttributes.USAGE_MEDIA
+            } else {
+                AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
             }
-            format.payloadType == STREAM_TYPE_MAIN_HIGH_AUDIO -> {
-                usage = AudioAttributes.USAGE_NOTIFICATION
-                contentType = AudioAttributes.CONTENT_TYPE_SONIFICATION
-            }
-            format.audioType == "default" ||
-                format.audioType == "alert" ||
-                format.audioType == "compatibility" -> {
-                usage = AudioAttributes.USAGE_NOTIFICATION_RINGTONE
-                contentType = AudioAttributes.CONTENT_TYPE_SONIFICATION
-            }
-            else -> {
-                usage = AudioAttributes.USAGE_MEDIA
-                contentType = AudioAttributes.CONTENT_TYPE_MUSIC
-            }
+        }
+        val contentType = when (usage) {
+            AudioAttributes.USAGE_MEDIA -> AudioAttributes.CONTENT_TYPE_MUSIC
+            AudioAttributes.USAGE_VOICE_COMMUNICATION,
+            AudioAttributes.USAGE_ASSISTANT,
+            AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE ->
+                AudioAttributes.CONTENT_TYPE_SPEECH
+            else -> AudioAttributes.CONTENT_TYPE_SONIFICATION
         }
         return AudioAttributes.Builder()
             .setUsage(usage)
@@ -497,35 +525,92 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
         return head
     }
 
-    private fun handle(rtp: ByteArray) {
+    private fun opusCodecDelay(): ByteArray =
+        java.nio.ByteBuffer.allocate(8)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            .putLong(OPUS_CODEC_DELAY_NANOS)
+            .array()
+
+    private fun opusSeekPreRoll(): ByteArray =
+        java.nio.ByteBuffer.allocate(8)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            .putLong(OPUS_SEEK_PRE_ROLL_NANOS)
+            .array()
+
+    private fun handle(packet: AudioPacket) {
+        val rtp = packet.rtp
+        val timestampUs = sampleTimestampUs(packet.sample)
         when (format.codec) {
             AudioCodecKind.LPCM -> writePcm(byteSwapS16(rtp.copyOfRange(12, rtp.size)))
             AudioCodecKind.AAC_LC -> {
-                val accessUnit = MediaCodecSupport.aacAccessUnit(rtp.copyOfRange(12, rtp.size))
+                val accessUnit = rtp.copyOfRange(12, rtp.size)
                 if (accessUnit.isNotEmpty()) {
+                    if (!firstAacPayloadLogged) {
+                        firstAacPayloadLogged = true
+                        Log.i(
+                            TAG,
+                            "audio AAC access unit bytes=${accessUnit.size} " +
+                                "head=${accessUnit.copyOf(minOf(accessUnit.size, 16)).toHexString()}",
+                        )
+                    }
                     feedCodec(
                         MediaCodecSupport.adtsFrame(accessUnit, format.sampleRate, format.channels),
+                        timestampUs,
                     )
                 }
             }
             AudioCodecKind.OPUS -> {
                 val accessUnit = rtp.copyOfRange(12, rtp.size)
-                if (accessUnit.isNotEmpty()) feedCodec(accessUnit)
+                if (accessUnit.size < MIN_OPUS_PACKET_BYTES) {
+                    if (!firstOpusShortPacketLogged) {
+                        firstOpusShortPacketLogged = true
+                        Log.i(
+                            TAG,
+                            "audio Opus skipping short packet bytes=${accessUnit.size} " +
+                                "head=${accessUnit.toHexString()}",
+                        )
+                    }
+                    return
+                }
+                feedCodec(accessUnit, timestampUs)
             }
         }
     }
 
-    private fun feedCodec(payload: ByteArray) {
+    private fun sampleTimestampUs(sample: Int): Long =
+        (sample.toLong() and 0xffff_ffffL) * 1_000_000L / format.sampleRate
+
+    private fun feedCodec(payload: ByteArray, presentationTimeUs: Long) {
         val codec = codec ?: return
         val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
-        if (index < 0) return
+        if (index < 0) {
+            inputDropped++
+            if (inputDropped == 1) {
+                Log.w(
+                    TAG,
+                    "audio decoder input unavailable codec=${format.codec} " +
+                        "queued=$inputQueued dropped=$inputDropped",
+                )
+            }
+            return
+        }
         val input = codec.getInputBuffer(index) ?: return
         input.clear()
         if (payload.size <= input.remaining()) {
             input.put(payload)
-            codec.queueInputBuffer(index, 0, payload.size, 0, 0)
+            codec.queueInputBuffer(index, 0, payload.size, presentationTimeUs, 0)
+            inputQueued++
+            if (!firstInputQueuedLogged) {
+                firstInputQueuedLogged = true
+                Log.i(
+                    TAG,
+                    "audio decoder first input codec=${format.codec} bytes=${payload.size} " +
+                        "head=${payload.copyOf(minOf(payload.size, 16)).toHexString()}",
+                )
+            }
         } else {
             codec.queueInputBuffer(index, 0, 0, 0, 0)
+            inputDropped++
         }
         drainCodec(codec)
     }
@@ -539,6 +624,17 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                 index >= 0 -> {
                     val size = info.size
+                    if (size > 0) {
+                        outputBuffers++
+                        if (outputBuffers == 1 || outputBuffers % DECODED_BUFFER_LOG_INTERVAL == 0) {
+                            Log.i(
+                                TAG,
+                                "audio decoder output codec=${format.codec} " +
+                                    "buffers=$outputBuffers bytes=$size " +
+                                    "queued=$inputQueued dropped=$inputDropped",
+                            )
+                        }
+                    }
                     if (size > 0) {
                         val output = codec.getOutputBuffer(index)
                         if (output != null) {
@@ -559,6 +655,15 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
 
     private fun writePcm(data: ByteArray, offset: Int = 0, length: Int = data.size) {
         val track = track ?: return
+        if (!firstPcmLogged && length > 0) {
+            firstPcmLogged = true
+            val end = minOf(data.size, offset + minOf(length, 16))
+            Log.i(
+                TAG,
+                "audio first PCM type=${format.payloadType} bytes=$length " +
+                    "head=${data.copyOfRange(offset, end).toHexString()}",
+            )
+        }
         if (!fadeApplied) {
             applyFadeIn(data, offset, length)
             fadeApplied = true
@@ -644,11 +749,16 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
 
     private companion object {
         const val TAG = "xcertplay-usb"
+        const val AAC_OBJECT_TYPE_LC = 2
+        const val MIN_OPUS_PACKET_BYTES = 4
+        const val OPUS_CODEC_DELAY_NANOS = 6_500_000L
+        const val OPUS_SEEK_PRE_ROLL_NANOS = 80_000_000L
         const val INPUT_TIMEOUT_US = 10_000L
         const val MAX_QUEUED_PACKETS = 64
         const val MIN_TRACK_BUFFER_BYTES = 16 * 1024
         const val MIN_START_BUFFER_BYTES = 4 * 1024
         const val PREBUFFER_WRITE_CHUNK_BYTES = 2 * 1024
+        const val DECODED_BUFFER_LOG_INTERVAL = 50
         const val STREAM_TYPE_MAIN_HIGH_AUDIO = 102
     }
 }

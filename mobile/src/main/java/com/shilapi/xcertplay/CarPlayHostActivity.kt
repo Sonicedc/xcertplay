@@ -57,6 +57,7 @@ import com.shilapi.xcertplay.orchestration.CarPlayTransport
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.UsbDeviceId
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -1155,7 +1156,11 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         sink = renderer
         currentSurface?.let(::attachSurface)
-        val media = CarPlayMediaEngine(renderer, microphoneEnabled = microphoneAvailable)
+        val media = CarPlayMediaEngine(
+            sink = renderer,
+            microphoneEnabled = microphoneAvailable,
+            audioCaptureDirectory = audioCaptureDirectory(),
+        )
         val pairings = AirPlayPersistence.loadPairings(this) { id, key ->
             AirPlayPersistence.savePairing(this, id, key)
         }
@@ -1217,6 +1222,11 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         controller = next
         next.start()
+    }
+
+    private fun audioCaptureDirectory(): File? {
+        if (!File(filesDir, AUDIO_CAPTURE_MARKER).isFile) return null
+        return File(filesDir, AUDIO_CAPTURE_DIRECTORY)
     }
 
     private fun scheduleDisplaySize(width: Int, height: Int) {
@@ -1562,6 +1572,8 @@ class CarPlayHostActivity : ComponentActivity() {
         const val LOG_RETENTION_MILLIS = 5 * 60_000L
         const val DISPLAY_CHANGE_DEBOUNCE_MILLIS = 500L
         const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
+        const val AUDIO_CAPTURE_MARKER = "audio-capture.enabled"
+        const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
         const val THREE_FINGER_COUNT = 3
         const val THREE_FINGER_SWIPE_DISTANCE_DP = 72
         const val THREE_FINGER_SWIPE_DIRECTION_RATIO = 1.15f

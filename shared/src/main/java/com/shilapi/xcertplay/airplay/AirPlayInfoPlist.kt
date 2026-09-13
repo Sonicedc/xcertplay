@@ -127,16 +127,17 @@ object AirPlayInfoPlist {
         val pcmMono = 0x154 or (if (is48) 0x4000 else 0x400)
         val opus = 0x70000000
         val aacLc = if (is48) 0x800000 else 0x400000
-        val input = if (microphone) pcmMono else null
+        val pcmInput = if (microphone) pcmMono else null
+        val wirelessInput = if (microphone) pcmMono or opus else null
 
         return listOf(
-            format(100, "compatibility", pcm, input),
+            format(100, "compatibility", pcm, pcmInput),
             format(101, "compatibility", pcm),
-            format(100, "default", pcm or opus, input),
+            format(100, "default", pcm or opus, wirelessInput),
             format(100, "alert", pcm or opus),
             format(100, "media", pcm),
-            format(100, "telephony", pcmMono or opus, input),
-            format(100, "speechRecognition", pcmMono or opus, input),
+            format(100, "telephony", pcmMono or opus, wirelessInput),
+            format(100, "speechRecognition", pcmMono or opus, wirelessInput),
             format(101, "default", pcm or opus),
             format(102, "media", aacLc),
         )

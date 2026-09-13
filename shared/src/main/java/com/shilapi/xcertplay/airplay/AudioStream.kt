@@ -1,11 +1,13 @@
 package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
+import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class AudioCodecKind { AAC_LC, OPUS, LPCM }
 
@@ -24,13 +26,25 @@ data class AudioFormat(
  * ciphertext, a 16-byte tag, then an 8-byte little-endian nonce. The header's last eight bytes
  * (timestamp + SSRC) are the AEAD associated data.
  */
-class AudioStream(private val key: ByteArray) : Closeable {
+class AudioStream(
+    private val key: ByteArray,
+    private val streamType: Int = -1,
+) : Closeable {
     interface Listener {
         fun onStarted(firstSample: Int) {}
         fun onRtp(rtp: ByteArray, sample: Int) {}
+        fun onPacket(
+            wire: ByteArray,
+            rtp: ByteArray?,
+            sample: Int?,
+            error: Throwable?,
+        ) {}
     }
 
     private val closed = AtomicBoolean(false)
+    private val receivedPackets = AtomicInteger()
+    private val decryptedPackets = AtomicInteger()
+    private val authenticationFailures = AtomicInteger()
     private var dataSocket: DatagramSocket? = null
     private var controlSocket: DatagramSocket? = null
     private var dataThread: Thread? = null
@@ -71,25 +85,67 @@ class AudioStream(private val key: ByteArray) : Closeable {
                 if (closed.get()) return else continue
             }
             val wire = packet.data.copyOf(packet.length)
-            if (wire.size < RTP_HEADER_LEN + TAIL_LEN) continue
+            val packetNumber = receivedPackets.incrementAndGet()
+            if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {
+                if (packetNumber == 1) {
+                    android.util.Log.w(
+                        TAG,
+                        "audio stream type=$streamType short packet bytes=${wire.size}",
+                    )
+                }
+                listener.onPacket(
+                    wire,
+                    null,
+                    null,
+                    IOException("audio packet shorter than RTP header plus tail"),
+                )
+                continue
+            }
 
             val aad = wire.copyOfRange(4, RTP_HEADER_LEN)
             val sealedEnd = wire.size - NONCE_LEN
             val sealed = wire.copyOfRange(RTP_HEADER_LEN, sealedEnd)
             val shortNonce = wire.copyOfRange(sealedEnd, wire.size)
             val nonce = ByteArray(12).also { shortNonce.copyInto(it, 4) }
+            val sample = readU32Be(wire, 4)
 
             val payload = try {
                 AirPlayCrypto.chachaOpen(key, nonce, sealed, aad)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                val failureNumber = authenticationFailures.incrementAndGet()
+                if (failureNumber == 1) {
+                    android.util.Log.w(
+                        TAG,
+                        "audio stream type=$streamType first decrypt failure " +
+                            "wire=${wire.toHexString()}",
+                        error,
+                    )
+                }
+                listener.onPacket(wire, null, sample, error)
                 continue
             }
-            val sample = readU32Be(wire, 4)
+            val rtp = wire.copyOf(RTP_HEADER_LEN) + payload
+            val decryptedNumber = decryptedPackets.incrementAndGet()
+            if (decryptedNumber <= FIRST_PACKET_LOG_COUNT) {
+                android.util.Log.i(
+                    TAG,
+                    "audio stream type=$streamType packet=$decryptedNumber sample=$sample " +
+                        "wireBytes=${wire.size} payloadBytes=${payload.size} " +
+                        "payloadHead=${payload.copyOf(minOf(payload.size, 16)).toHexString()}",
+                )
+            } else if (decryptedNumber % PACKET_LOG_INTERVAL == 0) {
+                android.util.Log.i(
+                    TAG,
+                    "audio stream type=$streamType decrypted=$decryptedNumber " +
+                        "authFailures=${authenticationFailures.get()}",
+                )
+            }
+            listener.onPacket(wire, rtp, sample, null)
             if (!started) {
                 started = true
                 listener.onStarted(sample)
             }
-            listener.onRtp(wire.copyOf(RTP_HEADER_LEN) + payload, sample)
+            listener.onRtp(rtp, sample)
         }
     }
 
@@ -117,12 +173,18 @@ class AudioStream(private val key: ByteArray) : Closeable {
             ((source[offset + 2].toInt() and 0xff) shl 8) or
             (source[offset + 3].toInt() and 0xff)
 
+    private fun ByteArray.toHexString(): String =
+        joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
     private companion object {
+        const val TAG = "xcertplay-usb"
         const val DATAGRAM_BYTES = 4_096
         const val RTP_HEADER_LEN = 12
         const val TAG_LEN = 16
         const val NONCE_LEN = 8
         const val TAIL_LEN = TAG_LEN + NONCE_LEN
+        const val FIRST_PACKET_LOG_COUNT = 3
+        const val PACKET_LOG_INTERVAL = 100
     }
 }
 

@@ -63,10 +63,23 @@ class AirPlayInfoPlistTest {
                 .map { it as Map<*, *> }
                 .single { it["audioType"] == "telephony" }
 
+        fun defaultAudio(info: Map<String, Any?>): Map<*, *> =
+            (info["audioFormats"] as List<*>)
+                .map { it as Map<*, *> }
+                .single { it["type"] == 100 && it["audioType"] == "default" }
+
         assertFalse(telephony(AirPlayInfoPlist.build(base)).containsKey("audioInputFormats"))
         assertTrue(
             telephony(AirPlayInfoPlist.build(base.copy(microphone = true)))
                 .containsKey("audioInputFormats"),
+        )
+        assertEquals(
+            0x70004154,
+            defaultAudio(AirPlayInfoPlist.build(base.copy(microphone = true)))["audioInputFormats"],
+        )
+        assertEquals(
+            0x70004154,
+            telephony(AirPlayInfoPlist.build(base.copy(microphone = true)))["audioInputFormats"],
         )
     }
 

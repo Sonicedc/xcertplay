@@ -12,12 +12,22 @@ data class MicrophoneConfig(
     val host: InetAddress,
     val port: Int,
     val key: ByteArray,
+    val codec: AudioCodecKind = AudioCodecKind.LPCM,
+    val bitrate: Int? = null,
 ) {
     val samplesPerPacket: Int
-        get() = maxOf(1, sampleRate * frameMillis / 1000)
+        get() = if (codec == AudioCodecKind.OPUS) {
+            OPUS_SAMPLES_PER_PACKET
+        } else {
+            maxOf(1, sampleRate * frameMillis / 1000)
+        }
 
     val frameBytes: Int
         get() = samplesPerPacket * channels * 2
+
+    private companion object {
+        const val OPUS_SAMPLES_PER_PACKET = 960
+    }
 }
 
 /** Mutable RTP/ChaCha counters for one microphone uplink. */

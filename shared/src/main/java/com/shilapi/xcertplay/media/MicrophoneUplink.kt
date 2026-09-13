@@ -4,9 +4,11 @@ import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
+import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.MicrophoneCounters
 import com.shilapi.xcertplay.airplay.MicrophonePacketizer
+import com.shilapi.xcertplay.airplay.toHexString
 import java.io.Closeable
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -25,6 +27,7 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
     private val firstPacketLogged = AtomicBoolean(false)
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var socket: DatagramSocket? = null
+    @Volatile private var opusEncoder: OpusEncoder? = null
     private var thread: Thread? = null
 
     fun start(): Boolean {
@@ -51,6 +54,16 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
             "speechrecognition" -> MediaRecorder.AudioSource.VOICE_RECOGNITION
             else -> MediaRecorder.AudioSource.MIC
         }
+        val nextEncoder = if (config.codec == AudioCodecKind.OPUS) {
+            OpusEncoder(config.bitrate ?: 48_000).takeIf { it.available }
+        } else {
+            null
+        }
+        if (config.codec == AudioCodecKind.OPUS && nextEncoder == null) {
+            Log.w(TAG, "microphone Opus encoder is unavailable")
+            running.set(false)
+            return false
+        }
         val bufferSize = maxOf(minBuffer * 2, config.frameBytes * 4)
         val nextRecorder = try {
             AudioRecord.Builder()
@@ -66,12 +79,14 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
                 .build()
         } catch (error: Exception) {
             Log.e(TAG, "microphone recorder creation failed", error)
+            nextEncoder?.close()
             running.set(false)
             return false
         }
         if (nextRecorder.state != AudioRecord.STATE_INITIALIZED) {
             Log.w(TAG, "microphone recorder failed to initialize")
             nextRecorder.release()
+            nextEncoder?.close()
             running.set(false)
             return false
         }
@@ -84,12 +99,14 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
         } catch (error: Exception) {
             Log.e(TAG, "microphone socket creation failed", error)
             nextRecorder.release()
+            nextEncoder?.close()
             running.set(false)
             return false
         }
 
         recorder = nextRecorder
         socket = nextSocket
+        opusEncoder = nextEncoder
         return try {
             nextRecorder.startRecording()
             thread = Thread({ capture(nextRecorder, nextSocket) }, "carplay-mic").apply {
@@ -146,17 +163,43 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
     }
 
     private fun sendFrame(socket: DatagramSocket, counters: MicrophoneCounters, frame: ByteArray) {
+        val bodies = if (config.codec == AudioCodecKind.OPUS) {
+            opusEncoder?.encode(frame).orEmpty()
+        } else {
+            listOf(MicrophonePacketizer.toWirePcm(frame))
+        }
+        bodies.forEach { body ->
+            sendPacket(
+                socket = socket,
+                counters = counters,
+                body = body,
+                samples = config.samplesPerPacket,
+            )
+        }
+    }
+
+    private fun sendPacket(
+        socket: DatagramSocket,
+        counters: MicrophoneCounters,
+        body: ByteArray,
+        samples: Int,
+    ) {
         val packet = MicrophonePacketizer.sealPacket(
             key = config.key,
             payloadType = config.payloadType,
             counters = counters,
-            body = MicrophonePacketizer.toWirePcm(frame),
-            samples = config.samplesPerPacket,
+            body = body,
+            samples = samples,
         )
         try {
             socket.send(DatagramPacket(packet, packet.size, config.host, config.port))
             if (firstPacketLogged.compareAndSet(false, true)) {
-                Log.i(TAG, "microphone first packet bytes=${packet.size} port=${config.port}")
+                Log.i(
+                    TAG,
+                    "microphone first packet bytes=${packet.size} body=${body.size} " +
+                        "head=${packet.copyOf(minOf(packet.size, 16)).toHexString()} " +
+                        "port=${config.port}",
+                )
             }
         } catch (error: Exception) {
             if (running.get()) throw error
@@ -206,6 +249,9 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
         } catch (_: Exception) {
             // Best effort.
         }
+        val currentEncoder = opusEncoder
+        opusEncoder = null
+        currentEncoder?.close()
     }
 
     private companion object {

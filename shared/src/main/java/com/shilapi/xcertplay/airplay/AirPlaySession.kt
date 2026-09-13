@@ -278,10 +278,27 @@ class AirPlaySession(
                 if (body == null) RtspMessage.Response(status = 400)
                 else RtspMessage.Response(headers = mapOf("Content-Type" to OCTET_CONTENT_TYPE), body = body)
             }
-            path.endsWith("/info") -> RtspMessage.Response(
-                headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
-                body = BplistCodec.encode(AirPlayInfoPlist.build(config)),
-            )
+            path.endsWith("/info") -> {
+                val info = AirPlayInfoPlist.build(config)
+                if (request.body.isNotEmpty()) {
+                    val requestInfo = try {
+                        BplistCodec.decode(request.body).toString()
+                    } catch (_: Exception) {
+                        "<unparseable ${request.body.size} bytes>"
+                    }
+                    Log.i(TAG, "airplay /info request=$requestInfo")
+                }
+                Log.i(
+                    TAG,
+                    "airplay /info features=${info["features"]} " +
+                        "audioFormats=${(info["audioFormats"] as? List<*>)?.size ?: 0} " +
+                        "audioLatencies=${(info["audioLatencies"] as? List<*>)?.size ?: 0}",
+                )
+                RtspMessage.Response(
+                    headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
+                    body = BplistCodec.encode(info),
+                )
+            }
             request.method == "POST" && path.endsWith("/command") -> handleCommand(request)
             request.method == "POST" && path.endsWith("/feedback") -> {
                 val body = media.onFeedback(this)
@@ -386,6 +403,7 @@ class AirPlaySession(
         }
         val type = string(body["type"])
         val params = asMap(body["params"]) ?: emptyMap()
+        Log.i(TAG, "airplay command type=$type keys=${params.keys.sorted()} params=$params")
         if (type == "requestUI") listener.onHostUiRequested(this)
         listener.onCommand(this, type, params)
         return RtspMessage.Response(status = 200)
