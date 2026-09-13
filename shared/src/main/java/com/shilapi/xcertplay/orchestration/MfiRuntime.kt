@@ -6,6 +6,11 @@ import com.shilapi.xcertplay.transport.I2cTransport
 import java.io.Closeable
 import java.io.IOException
 
+/** Signals the normal, retryable state where the MFi address probe found no chip. */
+internal class MfiCoprocessorNotFoundException : IOException(
+    "No MFi authentication coprocessor responded to the device probe",
+)
+
 /** An opened MFi coprocessor client plus the handle that releases its backing transport. */
 class MfiSession(
     val client: MfiAuthenticationClient,
@@ -20,7 +25,7 @@ class MfiSession(
 object MfiRuntime {
     fun scan(transport: I2cTransport): MfiAuthenticationClient {
         val chip = MfiDeviceScanner(transport).scan().chip
-            ?: throw IOException("No MFi authentication coprocessor responded to the device probe")
+            ?: throw MfiCoprocessorNotFoundException()
         return MfiAuthenticationClient(transport, chip.address7Bit)
     }
 }

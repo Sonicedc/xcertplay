@@ -31,6 +31,7 @@ import com.shilapi.xcertplay.transport.Iap2UsbSession
 import com.shilapi.xcertplay.transport.Iap2WiredCarPlayEndpoint
 import com.shilapi.xcertplay.transport.Iap2WiredControlClient
 import com.shilapi.xcertplay.transport.Iap2WiredControlTerminal
+import com.shilapi.xcertplay.transport.I2cTransportException
 import com.shilapi.xcertplay.transport.IphoneCarPlayConfiguration
 import com.shilapi.xcertplay.transport.IphoneUsbException
 import com.shilapi.xcertplay.transport.IphoneUsbHost
@@ -49,12 +50,15 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 sealed class CarPlayStatus {
     data object DiscoveringMfi : CarPlayStatus()
+    data object WaitingForMfi : CarPlayStatus()
     data object RequestingMfiPermission : CarPlayStatus()
     data object MfiReady : CarPlayStatus()
     data object DiscoveringIphone : CarPlayStatus()
+    data object WaitingForIphone : CarPlayStatus()
     data object RequestingIphonePermission : CarPlayStatus()
     data object WaitingForReenumeration : CarPlayStatus()
     data object SelectingConfiguration : CarPlayStatus()
@@ -107,8 +111,11 @@ class CarPlayController(
     private val systemBuid = UUID.randomUUID().toString().uppercase(Locale.US)
     private val lifecycleLock = Any()
     private val permissionGrant = AtomicBoolean(false)
+    private val availabilityPollGeneration = AtomicInteger(0)
     private var permissionPollGeneration = 0
     private var reenumerationAttempts = 0
+    private var lastReportedStatus: CarPlayStatus? = null
+    private var mfiResetLogged = false
 
     @Volatile private var closed = false
     @Volatile private var phase = Phase.IDLE
@@ -205,6 +212,7 @@ class CarPlayController(
             closed = true
         }
         closeReceivers()
+        availabilityPollGeneration.incrementAndGet()
         permissionPollGeneration += 1
         touchExecutor.shutdownNow()
         val service = vpnService
@@ -248,25 +256,36 @@ class CarPlayController(
     }
 
     private fun startMfi() {
+        availabilityPollGeneration.incrementAndGet()
         phase = Phase.MFI
+        onStatus(CarPlayStatus.DiscoveringMfi)
         if (config.ch341Devices.isNotEmpty()) {
-            val host = Ch341UsbHost(appContext, usbManager, Ch341DeviceMatcher(config.ch341Devices))
-            ch341Host = host
-            ch341PermissionCloseable = host.registerPermissionReceiver(::onCh341Permission)
-            onStatus(CarPlayStatus.DiscoveringMfi)
-            val device = host.discover().firstOrNull()
-            if (device == null) {
-                onStatus(CarPlayStatus.Failed("No configured CH341 USB device found"))
-            } else {
-                requestCh341Permission(device)
+            val host = ch341Host ?: Ch341UsbHost(
+                appContext,
+                usbManager,
+                Ch341DeviceMatcher(config.ch341Devices),
+            ).also {
+                ch341Host = it
+                ch341PermissionCloseable = it.registerPermissionReceiver(::onCh341Permission)
             }
+            checkCh341Mfi(host)
         } else {
             openLinuxMfi()
         }
     }
 
+    private fun checkCh341Mfi(host: Ch341UsbHost) {
+        if (closed || phase != Phase.MFI) return
+        val device = host.discover().firstOrNull()
+        if (device == null) {
+            waitForMfi()
+        } else {
+            availabilityPollGeneration.incrementAndGet()
+            requestCh341Permission(device)
+        }
+    }
+
     private fun openLinuxMfi() {
-        onStatus(CarPlayStatus.DiscoveringMfi)
         executor.execute {
             try {
                 val transport = LinuxI2cTransport.open(config.linuxI2cPath!!)
@@ -278,6 +297,8 @@ class CarPlayController(
                     transport.close()
                     throw error
                 }
+            } catch (_: MfiCoprocessorNotFoundException) {
+                waitForMfi()
             } catch (error: Throwable) {
                 fail(error)
             }
@@ -298,6 +319,7 @@ class CarPlayController(
     }
 
     private fun onCh341Permission(result: Ch341UsbHost.PermissionResult) {
+        if (closed || phase != Phase.MFI) return
         when (result) {
             is Ch341UsbHost.PermissionResult.Granted -> openCh341(result.device)
             is Ch341UsbHost.PermissionResult.Denied ->
@@ -310,46 +332,71 @@ class CarPlayController(
             when (result) {
                 is Ch341UsbHost.OpenResult.Connected -> {
                     val session: Ch341UsbSession = result.session
+                    if (closed || phase != Phase.MFI) {
+                        session.close()
+                        return@openAsync
+                    }
                     try {
-                    val transport = Ch341I2cTransport(session)
-                    config.ch341MfiResetGpio?.let { gpio ->
-                        transport.pulseActiveLowReset(gpio)
+                        val transport = Ch341I2cTransport(session)
+                        config.ch341MfiResetGpio?.let { gpio ->
+                            transport.pulseActiveLowReset(gpio)
+                            if (!mfiResetLogged) {
+                                mfiResetLogged = true
+                                Log.i(
+                                    IphoneCarPlayConfiguration.TAG,
+                                    "mfi reset pulse gpio=D$gpio mode=low/high-z",
+                                )
+                            }
+                        }
+                        val client = MfiRuntime.scan(transport)
                         Log.i(
                             IphoneCarPlayConfiguration.TAG,
-                            "mfi reset pulse gpio=D$gpio mode=low/high-z",
+                            "mfi coprocessor address=0x${client.address7Bit.toString(16)} " +
+                                "protocolMajor=${client.protocolMajor()}",
                         )
-                    }
-                    val client = MfiRuntime.scan(transport)
-                    Log.i(
-                        IphoneCarPlayConfiguration.TAG,
-                        "mfi coprocessor address=0x${client.address7Bit.toString(16)} " +
-                            "protocolMajor=${client.protocolMajor()}",
-                    )
-                    mfiSession = MfiSession(client, session)
+                        mfiSession = MfiSession(client, session)
                         onStatus(CarPlayStatus.MfiReady)
                         startIphone()
+                    } catch (_: MfiCoprocessorNotFoundException) {
+                        session.close()
+                        waitForMfi()
                     } catch (error: Throwable) {
                         session.close()
                         fail(error)
                     }
                 }
-                is Ch341UsbHost.OpenResult.Failed -> fail(result.error)
+                is Ch341UsbHost.OpenResult.Failed -> when (result.error) {
+                    is I2cTransportException.DeviceUnavailable -> waitForMfi()
+                    else -> fail(result.error)
+                }
             }
         }
     }
 
+    private fun waitForMfi() {
+        if (closed || phase != Phase.MFI) return
+        onStatus(CarPlayStatus.WaitingForMfi)
+        scheduleAvailabilityPoll(Phase.MFI) {
+            ch341Host?.let(::checkCh341Mfi) ?: openLinuxMfi()
+        }
+    }
+
     private fun startIphone() {
+        availabilityPollGeneration.incrementAndGet()
         phase = Phase.IPHONE
         reenumerationAttempts = 0
         onStatus(CarPlayStatus.DiscoveringIphone)
+        checkIphoneAvailability()
+    }
+
+    private fun checkIphoneAvailability() {
+        if (closed || phase != Phase.IPHONE) return
         val device = iphoneHost.discover().firstOrNull()
         if (device == null) {
-            onStatus(
-                CarPlayStatus.Failed(
-                    "No Apple USB device on host bus; check data cable/port/power. CH341/MFi stays active",
-                ),
-            )
+            onStatus(CarPlayStatus.WaitingForIphone)
+            scheduleAvailabilityPoll(Phase.IPHONE, ::checkIphoneAvailability)
         } else {
+            availabilityPollGeneration.incrementAndGet()
             requestIphonePermission(device)
         }
     }
@@ -449,9 +496,28 @@ class CarPlayController(
 
     private fun onIphoneAttached(device: UsbDevice) {
         when (phase) {
-            Phase.REENUMERATION, Phase.IPHONE -> requestIphonePermission(device)
+            Phase.REENUMERATION, Phase.IPHONE -> {
+                availabilityPollGeneration.incrementAndGet()
+                requestIphonePermission(device)
+            }
             else -> Unit
         }
+    }
+
+    private fun scheduleAvailabilityPoll(phase: Phase, check: () -> Unit) {
+        val generation = availabilityPollGeneration.get()
+        mainHandler.postDelayed(
+            {
+                if (
+                    !closed &&
+                    this.phase == phase &&
+                    generation == availabilityPollGeneration.get()
+                ) {
+                    check()
+                }
+            },
+            DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS,
+        )
     }
 
     private fun openDataPaths(device: UsbDevice) {
@@ -702,7 +768,10 @@ class CarPlayController(
     private fun onStatus(status: CarPlayStatus) {
         if (closed) return
         mainHandler.post {
-            if (!closed) reportStatus(status)
+            if (!closed && status != lastReportedStatus) {
+                lastReportedStatus = status
+                reportStatus(status)
+            }
         }
     }
 
@@ -712,6 +781,7 @@ class CarPlayController(
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
         private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
+        private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
 

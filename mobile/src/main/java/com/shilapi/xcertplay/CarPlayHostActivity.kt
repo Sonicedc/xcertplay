@@ -100,6 +100,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
     private var statusView: TextView? = null
+    private var statusScrollView: ScrollView? = null
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var sink: AndroidMediaSink? = null
@@ -126,7 +127,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val logLines = ArrayDeque<String>()
+    private val logLines = ArrayDeque<LogEntry>()
+    private val expireOldLogLines = Runnable { refreshLogView(System.currentTimeMillis()) }
     private val applyDisplaySize = Runnable {
         val size = pendingDisplaySize ?: return@Runnable
         pendingDisplaySize = null
@@ -228,6 +230,7 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         hideSystemBars()
+        scrollLogsToBottom()
         videoView?.post {
             val view = videoView ?: return@post
             scheduleDisplaySize(view.width, view.height)
@@ -236,6 +239,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(applyDisplaySize)
+        mainHandler.removeCallbacks(expireOldLogLines)
         shutdown(
             terminateProcess = isFinishing && !isChangingConfigurations,
             reason = "activity destroyed",
@@ -244,8 +248,11 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun buildContentView(): View {
-        val root = FrameLayout(this)
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(NO_VIDEO_BACKGROUND)
+        }
         val video = TextureView(this).apply {
+            isOpaque = false
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -258,11 +265,26 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         val log = TextView(this).apply {
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
             setPadding(dp(12), dp(8), dp(12), dp(8))
             textSize = 11f
             typeface = Typeface.MONOSPACE
             text = ""
+        }
+        val logScroll = object : ScrollView(this) {
+            override fun onInterceptTouchEvent(event: MotionEvent): Boolean = false
+            override fun onTouchEvent(event: MotionEvent): Boolean = false
+        }.apply {
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            isFillViewport = false
+            isFocusable = false
+            addView(
+                log,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> scrollLogsToBottom() }
         }
         val statusParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -281,7 +303,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
-        root.addView(log, statusParams)
+        root.addView(logScroll, statusParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -293,6 +315,7 @@ class CarPlayHostActivity : ComponentActivity() {
         gestureOverlay = gestureLayer
         settingsMenu = settings
         statusView = log
+        statusScrollView = logScroll
         return root
     }
 
@@ -636,7 +659,7 @@ class CarPlayHostActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         appendLog("AirPlay session active")
-                        statusView?.visibility = View.GONE
+                        statusScrollView?.visibility = View.GONE
                     }
                 }
 
@@ -646,7 +669,7 @@ class CarPlayHostActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         appendLog("AirPlay session ended; reconnecting from scratch")
-                        statusView?.visibility = View.VISIBLE
+                        statusScrollView?.visibility = View.VISIBLE
                         reconnectAfterLoss("AirPlay session ended")
                     }
                 }
@@ -657,7 +680,7 @@ class CarPlayHostActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         appendLog("CarPlay transport error: $message; reconnecting from scratch")
-                        statusView?.visibility = View.VISIBLE
+                        statusScrollView?.visibility = View.VISIBLE
                         reconnectAfterLoss("CarPlay transport error: $message")
                     }
                 }
@@ -762,7 +785,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val oldSink = sink
         controller = null
         sink = null
-        statusView?.visibility = View.GONE
+        statusScrollView?.visibility = View.GONE
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
         logLines.clear()
@@ -796,7 +819,7 @@ class CarPlayHostActivity : ComponentActivity() {
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
-        statusView?.visibility = View.VISIBLE
+        statusScrollView?.visibility = View.VISIBLE
         logLines.clear()
         appendLog(
             "Settings closed; starting a fresh handshake at " +
@@ -909,16 +932,38 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun setStatus(message: String) {
         runOnUiThread {
-            statusView?.visibility = View.VISIBLE
+            statusScrollView?.visibility = View.VISIBLE
             appendLog(message)
         }
     }
 
     private fun appendLog(message: String) {
-        val line = "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())}  $message"
-        logLines.addLast(line)
-        while (logLines.size > MAX_LOG_LINES) logLines.removeFirst()
-        statusView?.text = logLines.joinToString("\n")
+        val now = System.currentTimeMillis()
+        val line = "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(now))}  $message"
+        logLines.addLast(LogEntry(now, line))
+        refreshLogView(now)
+    }
+
+    private fun refreshLogView(nowMillis: Long) {
+        val cutoff = nowMillis - LOG_RETENTION_MILLIS
+        while (logLines.firstOrNull()?.timestampMillis?.let { it <= cutoff } == true) {
+            logLines.removeFirst()
+        }
+        statusView?.text = logLines.joinToString("\n") { it.text }
+        scrollLogsToBottom()
+
+        mainHandler.removeCallbacks(expireOldLogLines)
+        logLines.firstOrNull()?.let { oldest ->
+            val delay = (oldest.timestampMillis + LOG_RETENTION_MILLIS - nowMillis + 1L)
+                .coerceAtLeast(1L)
+            mainHandler.postDelayed(expireOldLogLines, delay)
+        }
+    }
+
+    private fun scrollLogsToBottom() {
+        statusScrollView?.post {
+            statusScrollView?.fullScroll(View.FOCUS_DOWN)
+        }
     }
 
     private fun hideSystemBars() {
@@ -933,9 +978,11 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun CarPlayStatus.describe(): String = when (this) {
         CarPlayStatus.DiscoveringMfi -> "Discovering MFi coprocessor"
+        CarPlayStatus.WaitingForMfi -> "Waiting for MFi coprocessor"
         CarPlayStatus.RequestingMfiPermission -> "Requesting MFi USB permission"
         CarPlayStatus.MfiReady -> "MFi coprocessor ready"
         CarPlayStatus.DiscoveringIphone -> "Discovering iPhone"
+        CarPlayStatus.WaitingForIphone -> "Waiting for iPhone"
         CarPlayStatus.RequestingIphonePermission -> "Requesting iPhone USB permission"
         CarPlayStatus.WaitingForReenumeration -> "Waiting for iPhone re-enumeration"
         CarPlayStatus.SelectingConfiguration -> "Selecting CarPlay configuration"
@@ -952,7 +999,7 @@ class CarPlayHostActivity : ComponentActivity() {
         const val TAG = "xcertplay-usb"
         const val SCREEN_TYPE_MAIN = 110
         const val SCREEN_TYPE_ALT = 111
-        const val MAX_LOG_LINES = 120
+        const val LOG_RETENTION_MILLIS = 5 * 60_000L
         const val DISPLAY_CHANGE_DEBOUNCE_MILLIS = 500L
         const val CONTROLLER_CLOSE_TIMEOUT_MILLIS = 4_000L
         const val THREE_FINGER_COUNT = 3
@@ -964,7 +1011,9 @@ class CarPlayHostActivity : ComponentActivity() {
         val MENU_ACCENT_TRACK = Color.rgb(78, 143, 102)
         val MENU_TRACK_OFF = Color.rgb(64, 74, 80)
         val MENU_BUTTON_TEXT = Color.rgb(8, 17, 11)
+        val NO_VIDEO_BACKGROUND = Color.rgb(0x16, 0x16, 0x18)
     }
 
     private data class DisplaySize(val width: Int, val height: Int)
+    private data class LogEntry(val timestampMillis: Long, val text: String)
 }
