@@ -49,6 +49,85 @@ class AirPlayInfoPlistTest {
     }
 
     @Test
+    fun drivingSideAndDisplayValuesAreAdvertised() {
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(
+                    widthPixels = 1280,
+                    heightPixels = 720,
+                    fps = 37,
+                    widthPhysicalMm = 125,
+                ),
+                rightHandDrive = true,
+                manufacturer = "Example",
+                model = "HeadUnit",
+            ),
+        )
+
+        val display = (info["displays"] as List<*>).single() as Map<*, *>
+        assertEquals(true, info["rightHandDrive"])
+        assertEquals("Example", info["manufacturer"])
+        assertEquals("HeadUnit", info["model"])
+        assertEquals(35, display["maxFPS"])
+        assertEquals(150, display["widthPhysical"])
+        assertEquals(84, display["heightPhysical"])
+    }
+
+    @Test
+    fun squareOemIconIsAdvertisedWithItsOriginalBytes() {
+        val iconBytes = byteArrayOf(0x01, 0x02, 0x03, 0x04)
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+                icons = listOf(AirPlayIcon(1, 1, iconBytes)),
+                oemLabel = "xcertplay",
+            ),
+        )
+
+        val icon = (info["oemIcons"] as List<*>).single() as Map<*, *>
+        assertEquals(true, info["oemIconVisible"])
+        assertEquals("xcertplay", info["oemIconLabel"])
+        assertEquals(1, icon["widthPixels"])
+        assertEquals(1, icon["heightPixels"])
+        assertTrue((icon["imageData"] as ByteArray).contentEquals(iconBytes))
+    }
+
+    @Test
+    fun safeAreaInsetsReachTheAirPlayViewArea() {
+        val info = AirPlayInfoPlist.build(
+            AirPlayConfig(
+                deviceName = "test",
+                deviceId = "02:00:00:00:00:02",
+                btMac = "02:00:00:00:00:02",
+                sourceVersion = "366.0",
+                main = AirPlayDisplayConfig(
+                    widthPixels = 960,
+                    heightPixels = 540,
+                    safeArea = AirPlayInsets(top = 10, bottom = 15, left = 20, right = 25),
+                    safeAreaDrawOutside = false,
+                ),
+            ),
+        )
+
+        val display = (info["displays"] as List<*>).single() as Map<*, *>
+        val view = (display["viewAreas"] as List<*>).single() as Map<*, *>
+        val safe = view["safeArea"] as Map<*, *>
+        assertEquals(915, safe["widthPixels"])
+        assertEquals(515, safe["heightPixels"])
+        assertEquals(20, safe["originXPixels"])
+        assertEquals(10, safe["originYPixels"])
+        assertEquals(false, safe["drawUIOutsideSafeArea"])
+    }
+
+    @Test
     fun microphoneInputsAreAdvertisedOnlyWhenEnabled() {
         val base = AirPlayConfig(
             deviceName = "test",

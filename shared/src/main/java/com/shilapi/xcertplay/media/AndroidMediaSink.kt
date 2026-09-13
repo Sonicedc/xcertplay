@@ -133,6 +133,7 @@ private class VideoDecoder(
     private var lastConfig: VideoJob.Config? = null
     private var renderedFrameLogged = false
     private var submittedFrameLogged = false
+    private var duplicateConfigLogged = false
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true; start() }
 
     fun configure(codec: VideoCodec, codecData: ByteArray) {
@@ -175,7 +176,20 @@ private class VideoDecoder(
     }
 
     private fun configureDecoder(config: VideoJob.Config) {
+        val previous = lastConfig
+        if (
+            decoder != null &&
+            previous?.codec == config.codec &&
+            previous.codecData.contentEquals(config.codecData)
+        ) {
+            if (!duplicateConfigLogged) {
+                duplicateConfigLogged = true
+                Log.i(TAG, "video decoder config unchanged; keeping existing decoder")
+            }
+            return
+        }
         lastConfig = config
+        duplicateConfigLogged = false
         releaseDecoder()
         val surface = outputSurface ?: return
         val codec = config.codec
@@ -232,12 +246,23 @@ private class VideoDecoder(
     private fun changeSurface(surface: Surface?) {
         if (outputSurface === surface) return
         outputSurface = surface
-        releaseDecoder()
         if (surface == null) {
+            releaseDecoder()
             Log.i(TAG, "video decoder detached from surface")
-        } else {
-            lastConfig?.let(::configureDecoder)
+            return
         }
+        val codec = decoder
+        if (codec != null) {
+            try {
+                codec.setOutputSurface(surface)
+                Log.i(TAG, "video decoder output surface updated")
+                return
+            } catch (error: Exception) {
+                Log.w(TAG, "video decoder output surface update failed; reconfiguring", error)
+            }
+        }
+        releaseDecoder()
+        lastConfig?.let(::configureDecoder)
     }
 
     private fun feed(nalus: ByteArray) {

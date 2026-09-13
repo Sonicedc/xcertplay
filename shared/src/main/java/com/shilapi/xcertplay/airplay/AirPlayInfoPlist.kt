@@ -39,7 +39,7 @@ object AirPlayInfoPlist {
             "deviceID" to config.deviceId,
             "bluetoothIDs" to listOf(config.btMac),
             "name" to config.deviceName,
-            "rightHandDrive" to false,
+            "rightHandDrive" to config.rightHandDrive,
             "keepAliveLowPower" to false,
             "keepAliveSendStatsAsBody" to false,
             "modes" to modes(),
@@ -144,14 +144,17 @@ object AirPlayInfoPlist {
     }
 
     private fun displayEntry(display: AirPlayDisplayConfig, type: Int, uuid: String): Map<String, Any?> {
-        val widthPhysical = display.widthPhysicalMm ?: 200
+        val widthPhysical = AirPlayDisplaySettings.sanitizeWidthPhysicalMm(
+            display.widthPhysicalMm ?: AirPlayDisplaySettings.DEFAULT_WIDTH_PHYSICAL_MM,
+        )
         val heightPhysical = display.heightPhysicalMm
             ?: maxOf(1, Math.round(widthPhysical * display.heightPixels.toDouble() / display.widthPixels).toInt())
+        val fps = AirPlayDisplaySettings.sanitizeFps(display.fps)
 
         val entry = linkedMapOf<String, Any?>(
             "uuid" to uuid,
             "type" to type,
-            "maxFPS" to display.fps,
+            "maxFPS" to fps,
             "widthPixels" to display.widthPixels,
             "heightPixels" to display.heightPixels,
             "widthPhysical" to widthPhysical,
