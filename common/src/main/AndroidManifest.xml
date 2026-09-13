@@ -7,7 +7,7 @@
 
         <activity
             android:name="com.shilapi.xcertplay.CarPlayHostActivity"
-            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"

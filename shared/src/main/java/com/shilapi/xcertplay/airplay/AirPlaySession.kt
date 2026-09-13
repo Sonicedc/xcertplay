@@ -70,6 +70,7 @@ class AirPlaySession(
     private var eventSocket: Socket? = null
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
+    private var pendingNightMode: Boolean? = null
     private val firstTouchSendLogged = AtomicBoolean(false)
     private val touchSendFailureLogged = AtomicBoolean(false)
     private val ntp = NtpClock()
@@ -106,7 +107,11 @@ class AirPlaySession(
         if (notified.compareAndSet(false, true)) listener.onSessionEnded(this)
     }
 
-    fun sendCommand(command: Map<String, Any?>): Boolean {
+    fun sendCommand(command: Map<String, Any?>): Boolean = synchronized(eventWriteLock) {
+        sendCommandLocked(command)
+    }
+
+    private fun sendCommandLocked(command: Map<String, Any?>): Boolean {
         val socket = eventSocket ?: return false
         val cipher = eventCipher ?: return false
         eventCseq++
@@ -117,11 +122,9 @@ class AirPlaySession(
             "CSeq: $eventCseq\r\n\r\n"
         return try {
             val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
-            synchronized(eventWriteLock) {
-                val output = socket.getOutputStream()
-                output.write(bytes)
-                output.flush()
-            }
+            val output = socket.getOutputStream()
+            output.write(bytes)
+            output.flush()
             true
         } catch (error: Exception) {
             Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
@@ -172,8 +175,19 @@ class AirPlaySession(
         sendCommand(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 3)))
     }
 
-    fun setNightMode(night: Boolean) =
-        sendCommand(linkedMapOf("type" to "setNightMode", "params" to linkedMapOf("nightMode" to night)))
+    fun setNightMode(night: Boolean): Boolean = synchronized(eventWriteLock) {
+        pendingNightMode = night
+        sendPendingNightModeLocked()
+    }
+
+    private fun sendPendingNightModeLocked(): Boolean {
+        val night = pendingNightMode ?: return true
+        val sent = sendCommandLocked(
+            linkedMapOf("type" to "setNightMode", "params" to linkedMapOf("nightMode" to night)),
+        )
+        if (sent) pendingNightMode = null
+        return sent
+    }
 
     private fun sendHidReport(uid: Int, report: ByteArray): Boolean =
         sendCommand(
@@ -506,6 +520,9 @@ class AirPlaySession(
                 32,
             )
             eventCipher = ControlCipher(readKey, writeKey)
+            synchronized(eventWriteLock) {
+                sendPendingNightModeLocked()
+            }
             runEventRead(socket)
         } catch (error: Exception) {
             if (!closed.get()) {

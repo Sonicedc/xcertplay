@@ -212,6 +212,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var userLeaving = false
     private var menuOpen = false
     private var latestStage = "Preparing CarPlay"
+    private var darkMode = false
+    private var activeAirPlaySession: AirPlaySession? = null
     private val activeScreenStreamTypes = mutableSetOf<Int>()
     private var handshakeResetInProgress = false
     private var startAfterHandshakeReset = false
@@ -274,6 +276,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        darkMode = isDarkMode(resources.configuration.uiMode)
         advancedAudioChannelMappingSupported =
             resources.getBoolean(R.bool.config_advanced_audio_channel_mapping)
         airPlayIdentity = AirPlayPersistence.loadIdentity(this)
@@ -418,6 +421,11 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        val nextDarkMode = isDarkMode(newConfig.uiMode)
+        if (nextDarkMode != darkMode) {
+            darkMode = nextDarkMode
+            syncAirPlayDarkMode()
+        }
         applyFullscreenMode()
         stageStatusView?.maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
         scrollLogsToBottom()
@@ -2051,15 +2059,19 @@ class CarPlayHostActivity : ComponentActivity() {
             listener = object : AirPlaySessionListener {
                 override fun onSessionActive(session: AirPlaySession) {
                     runOnUiThread {
-                        if (menuOpen || controllerGeneration != restartGeneration) {
+                        if (controllerGeneration != restartGeneration) {
                             return@runOnUiThread
                         }
+                        activeAirPlaySession = session
+                        syncAirPlayDarkMode()
+                        if (menuOpen) return@runOnUiThread
                         appendLog("AirPlay session active")
                     }
                 }
 
                 override fun onSessionEnded(session: AirPlaySession) {
                     runOnUiThread {
+                        if (activeAirPlaySession === session) activeAirPlaySession = null
                         if (menuOpen || controllerGeneration != restartGeneration) {
                             return@runOnUiThread
                         }
@@ -2100,6 +2112,15 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         controller = next
         next.start()
+    }
+
+    private fun syncAirPlayDarkMode() {
+        val session = activeAirPlaySession ?: return
+        val sent = session.setNightMode(darkMode)
+        Log.i(
+            TAG,
+            "AirPlay dark mode=${if (darkMode) "dark" else "light"} eventChannelReady=$sent",
+        )
     }
 
     private fun audioCaptureDirectory(): File? {
