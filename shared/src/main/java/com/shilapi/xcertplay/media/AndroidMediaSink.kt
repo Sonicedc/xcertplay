@@ -28,6 +28,7 @@ class AndroidMediaSink(
     private val videoWidth: Int = 1280,
     private val videoHeight: Int = 720,
     private val preferSoftwareHevcDecoder: Boolean = false,
+    private val onScreenStreamActiveChanged: (Int, Boolean) -> Unit = { _, _ -> },
 ) : MediaSink {
     private val defaultSurface = surface
     private val surfaces = ConcurrentHashMap<Int, Surface>()
@@ -56,6 +57,10 @@ class AndroidMediaSink(
 
     override fun onVideoFrame(type: Int, naluBytes: ByteArray) {
         videoDecoder(type).submit(naluBytes)
+    }
+
+    override fun onScreenStreamActive(type: Int, active: Boolean) {
+        onScreenStreamActiveChanged(type, active)
     }
 
     override fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {

@@ -10,6 +10,7 @@ interface MediaSink {
     fun onVideoCodec(type: Int, codec: VideoCodec) {}
     fun onVideoConfig(type: Int, codecData: ByteArray) {}
     fun onVideoFrame(type: Int, naluBytes: ByteArray) {}
+    fun onScreenStreamActive(type: Int, active: Boolean) {}
     fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {}
     fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {}
     fun onAudioStopped(type: Int) {}
@@ -54,11 +55,13 @@ class CarPlayMediaEngine(
                         TAG,
                         "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
                     )
+                    if (streams.remove(type, screen)) sink.onScreenStreamActive(type, false)
                     session.close()
                 }
             },
         )
-        streams[type] = screen
+        streams.put(type, screen)?.close()
+        sink.onScreenStreamActive(type, true)
         return port
     }
 
@@ -171,9 +174,13 @@ class CarPlayMediaEngine(
         audioMeta.remove(type)
         sink.onAudioStopped(type)
         streams.remove(type)?.close()
+        if (isScreenStreamType(type)) sink.onScreenStreamActive(type, false)
     }
 
     override fun onSessionClosed(session: AirPlaySession) {
+        streams.keys.filter(::isScreenStreamType).forEach { type ->
+            sink.onScreenStreamActive(type, false)
+        }
         streams.values.toList().forEach { it.close() }
         streams.clear()
         audioMeta.clear()
@@ -233,8 +240,13 @@ class CarPlayMediaEngine(
         )
     }
 
+    private fun isScreenStreamType(type: Int): Boolean =
+        type == STREAM_TYPE_MAIN_SCREEN || type == STREAM_TYPE_ALT_SCREEN
+
     private companion object {
         const val TAG = "xcertplay-usb"
+        const val STREAM_TYPE_MAIN_SCREEN = 110
+        const val STREAM_TYPE_ALT_SCREEN = 111
         const val STREAM_TYPE_MAIN_AUDIO = 100
         const val STREAM_TYPE_DATA = 130
         const val DATASTREAM_OUTPUT_KEY = "DataStream-Output-Encryption-Key"

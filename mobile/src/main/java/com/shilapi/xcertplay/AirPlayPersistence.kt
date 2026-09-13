@@ -30,6 +30,7 @@ object AirPlayPersistence {
     private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
     private const val KEY_MANUAL_HOTSPOT_SSID = "manual_hotspot_ssid"
     private const val KEY_MANUAL_HOTSPOT_PASSPHRASE = "manual_hotspot_passphrase"
+    private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
 
     fun loadDisplayScaleTenths(context: Context): Int {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -106,6 +107,16 @@ object AirPlayPersistence {
     fun saveManualHotspotPassphrase(context: Context, passphrase: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_MANUAL_HOTSPOT_PASSPHRASE, passphrase)
+            .apply()
+    }
+
+    fun loadDebugLogsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_DEBUG_LOGS_ENABLED, true)
+
+    fun saveDebugLogsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_DEBUG_LOGS_ENABLED, enabled)
             .apply()
     }
 

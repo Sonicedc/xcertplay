@@ -7,6 +7,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -14,6 +15,7 @@ import android.os.Looper
 import android.os.Process
 import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.Log
 import android.view.Gravity
@@ -130,6 +132,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var settingsMenu: View? = null
     private var statusView: TextView? = null
     private var statusScrollView: ScrollView? = null
+    private var stageStatusView: TextView? = null
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var hotspotStatusView: TextView? = null
@@ -143,6 +146,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var displayScaleTenths = CarPlayDisplayScale.DEFAULT_TENTHS
     private var hevcEnabled = true
     private var hevcSoftwareDecoderEnabled = false
+    private var debugLogsEnabled = true
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
     private var wirelessEnabled = false
@@ -156,6 +160,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var hotspotStatus = HotspotStatus(state = "off")
     private var userLeaving = false
     private var menuOpen = false
+    private var latestStage = "Preparing CarPlay"
+    private val activeScreenStreamTypes = mutableSetOf<Int>()
     private var handshakeResetInProgress = false
     private var startAfterHandshakeReset = false
     private var restartGeneration = 0
@@ -208,6 +214,7 @@ class CarPlayHostActivity : ComponentActivity() {
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
         hevcSoftwareDecoderEnabled = AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
+        debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         wirelessEnabled = AirPlayPersistence.loadWirelessEnabled(this)
         wirelessHotspotMode = AirPlayPersistence.loadWirelessHotspotMode(this)
         manualHotspotSsid = AirPlayPersistence.loadManualHotspotSsid(this)
@@ -327,6 +334,7 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         hideSystemBars()
+        stageStatusView?.maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
         scrollLogsToBottom()
         videoView?.post {
             val view = videoView ?: return@post
@@ -383,12 +391,34 @@ class CarPlayHostActivity : ComponentActivity() {
             )
             addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> scrollLogsToBottom() }
         }
+        val stageStatus = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            text = latestStage
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.argb(170, 0, 0, 0))
+            }
+        }
         val statusParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM or Gravity.START,
         )
         statusParams.setMargins(dp(12), 0, dp(12), dp(12))
+        val stageParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END,
+        )
+        stageParams.setMargins(dp(12), dp(12), dp(12), 0)
 
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
 
@@ -401,6 +431,7 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
         )
         root.addView(logScroll, statusParams)
+        root.addView(stageStatus, stageParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -413,6 +444,8 @@ class CarPlayHostActivity : ComponentActivity() {
         settingsMenu = settings
         statusView = log
         statusScrollView = logScroll
+        stageStatusView = stageStatus
+        updateDebugOverlays()
         return root
     }
 
@@ -675,6 +708,49 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         content.addView(
             softwareHevcRow,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(16) },
+        )
+
+        val debugLogsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        debugLogsRow.addView(
+            menuText("Debug logs", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val debugLogsSwitch = Switch(this).apply {
+            isChecked = debugLogsEnabled
+            contentDescription = "Show on-screen debug logs"
+            showText = false
+            thumbTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+            )
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
+            )
+            setOnCheckedChangeListener { _, checked ->
+                if (debugLogsEnabled == checked) return@setOnCheckedChangeListener
+                debugLogsEnabled = checked
+                AirPlayPersistence.saveDebugLogsEnabled(this@CarPlayHostActivity, debugLogsEnabled)
+                appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
+                updateDebugOverlays()
+            }
+        }
+        debugLogsRow.addView(
+            debugLogsSwitch,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        content.addView(
+            debugLogsRow,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1073,6 +1149,9 @@ class CarPlayHostActivity : ComponentActivity() {
             videoWidth = airPlayConfig.main.widthPixels,
             videoHeight = airPlayConfig.main.heightPixels,
             preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
+            onScreenStreamActiveChanged = { type, active ->
+                onScreenStreamStateChanged(controllerGeneration, type, active)
+            },
         )
         sink = renderer
         currentSurface?.let(::attachSurface)
@@ -1093,7 +1172,6 @@ class CarPlayHostActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         appendLog("AirPlay session active")
-                        statusScrollView?.visibility = View.GONE
                     }
                 }
 
@@ -1102,8 +1180,9 @@ class CarPlayHostActivity : ComponentActivity() {
                         if (menuOpen || controllerGeneration != restartGeneration) {
                             return@runOnUiThread
                         }
+                        activeScreenStreamTypes.clear()
+                        setConnectionStage("CarPlay session ended; reconnecting")
                         appendLog("AirPlay session ended; reconnecting from scratch")
-                        statusScrollView?.visibility = View.VISIBLE
                         reconnectAfterLoss("AirPlay session ended")
                     }
                 }
@@ -1113,8 +1192,9 @@ class CarPlayHostActivity : ComponentActivity() {
                         if (menuOpen || controllerGeneration != restartGeneration) {
                             return@runOnUiThread
                         }
+                        activeScreenStreamTypes.clear()
+                        setConnectionStage("Transport error; reconnecting")
                         appendLog("CarPlay transport error: $message; reconnecting from scratch")
-                        statusScrollView?.visibility = View.VISIBLE
                         reconnectAfterLoss("CarPlay transport error: $message")
                     }
                 }
@@ -1194,6 +1274,8 @@ class CarPlayHostActivity : ComponentActivity() {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
         val size = activeDisplaySize ?: return
         appendLog(reason)
+        activeScreenStreamTypes.clear()
+        setConnectionStage(reason)
         Log.i(TAG, "$reason; rebuilding stack at ${size.width}x${size.height}")
         val generation = ++restartGeneration
         val oldController = controller
@@ -1223,9 +1305,11 @@ class CarPlayHostActivity : ComponentActivity() {
         val oldSink = sink
         controller = null
         sink = null
-        statusScrollView?.visibility = View.GONE
+        activeScreenStreamTypes.clear()
+        setConnectionStage("Reconnecting after settings")
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
+        updateDebugOverlays()
         logLines.clear()
         appendLog("Settings opened; CarPlay handshake reset")
         updateResolutionMenu()
@@ -1258,7 +1342,7 @@ class CarPlayHostActivity : ComponentActivity() {
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
-        statusScrollView?.visibility = View.VISIBLE
+        updateDebugOverlays()
         logLines.clear()
         appendLog(
             "Settings closed; starting a fresh handshake at " +
@@ -1370,11 +1454,38 @@ class CarPlayHostActivity : ComponentActivity() {
         return total / event.pointerCount
     }
 
+    private fun onScreenStreamStateChanged(generation: Int, type: Int, active: Boolean) {
+        runOnUiThread {
+            if (shuttingDown.get() || generation != restartGeneration) return@runOnUiThread
+            if (active) {
+                activeScreenStreamTypes.add(type)
+            } else {
+                activeScreenStreamTypes.remove(type)
+            }
+            updateDebugOverlays()
+        }
+    }
+
     private fun setStatus(message: String) {
         runOnUiThread {
-            statusScrollView?.visibility = View.VISIBLE
+            setConnectionStage(message)
             appendLog(message)
         }
+    }
+
+    private fun setConnectionStage(message: String) {
+        latestStage = message
+        stageStatusView?.text = message
+        updateDebugOverlays()
+    }
+
+    private fun updateDebugOverlays() {
+        val showLogs = debugLogsEnabled && !menuOpen
+        statusScrollView?.visibility = if (showLogs) View.VISIBLE else View.GONE
+        val showStage = !debugLogsEnabled &&
+            !menuOpen &&
+            activeScreenStreamTypes.isEmpty()
+        stageStatusView?.visibility = if (showStage) View.VISIBLE else View.GONE
     }
 
     private fun appendLog(message: String) {
