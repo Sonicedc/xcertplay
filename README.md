@@ -20,7 +20,7 @@ bus to access the MFi authentication coprocessor.
 
 ## Current progress
 
-The wired connection has been tested; it works.
+It works on my own car, both wireless and wired. Now drawing PCB...
 
 ## Project structure
 
