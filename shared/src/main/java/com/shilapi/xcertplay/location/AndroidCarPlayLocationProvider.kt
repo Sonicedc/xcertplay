@@ -54,6 +54,7 @@ class AndroidCarPlayLocationProvider(
         if (started) {
             true
         } else {
+            seedLastKnownLocations()
             var subscribedProviders = 0
             for (provider in preferredProviders) {
                 try {
@@ -74,6 +75,23 @@ class AndroidCarPlayLocationProvider(
                 Log.w(TAG, "No Android location provider could be started")
             }
             started
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun seedLastKnownLocations() {
+        for (provider in preferredProviders) {
+            val location = try {
+                locationManager.getLastKnownLocation(provider)
+            } catch (error: Exception) {
+                Log.w(TAG, "Could not read last known location from $provider", error)
+                null
+            } ?: continue
+            latestFixes[provider] = location
+            Log.i(
+                TAG,
+                "Seeded $provider location ageMs=${(System.currentTimeMillis() - location.time).coerceAtLeast(0)}",
+            )
         }
     }
 

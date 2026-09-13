@@ -252,7 +252,6 @@ class CarPlayHostActivity : ComponentActivity() {
     private var awaitingLocationPermission = false
     private var vpnReady = false
     private var hotspotStatus = HotspotStatus(state = "off")
-    private var userLeaving = false
     private var menuOpen = false
     private var latestStage = "Preparing CarPlay"
     private var darkMode = false
@@ -347,10 +346,13 @@ class CarPlayHostActivity : ComponentActivity() {
             "Host started; CH341 1A86:5512 configured; " +
                 "transport=${if (wirelessEnabled) "wireless" else "wired"}",
         )
+        val reusedBackgroundSession = adoptBackgroundSession()
         microphoneAvailable =
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         microphonePermissionResolved = microphoneAvailable
-        if (microphonePermissionResolved) {
+        if (reusedBackgroundSession) {
+            updateDebugOverlays()
+        } else if (microphonePermissionResolved) {
             requestStartupPrerequisites()
         } else {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -459,7 +461,6 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        userLeaving = false
         locationPermissionAvailable = hasFineLocationPermission()
         if (locationReportingEnabled && !locationPermissionAvailable && !menuOpen) {
             requestLocationPermission()
@@ -474,24 +475,9 @@ class CarPlayHostActivity : ComponentActivity() {
         if (hasFocus) applyFullscreenMode()
     }
 
-    override fun onUserLeaveHint() {
-        userLeaving = true
-        super.onUserLeaveHint()
-    }
-
     override fun onStop() {
+        // The controller, USB/iAP2 link, and VPN attachment intentionally outlive the UI.
         super.onStop()
-        if (
-            userLeaving &&
-            !isChangingConfigurations &&
-            !awaitingVpnConsent &&
-            !awaitingWirelessPermissions &&
-            !awaitingLocationPermission &&
-            !externalActivityInProgress
-        ) {
-            finishAndRemoveTask()
-            shutdown(terminateProcess = true, reason = "activity left foreground")
-        }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -513,10 +499,13 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onDestroy() {
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
-        shutdown(
-            terminateProcess = isFinishing && !isChangingConfigurations,
-            reason = "activity destroyed",
-        )
+        currentSurface?.let { surface ->
+            sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
+            sink?.clearSurface(SCREEN_TYPE_ALT, surface)
+            surface.release()
+        }
+        currentSurface = null
+        currentSurfaceTexture = null
         super.onDestroy()
     }
 
@@ -2248,6 +2237,121 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun normalizedModel(): String =
         model.trim().ifBlank { AirPlayPersistence.DEFAULT_MODEL }
 
+    private fun createMediaSink(
+        videoWidth: Int,
+        videoHeight: Int,
+        controllerGeneration: Int,
+    ): AndroidMediaSink = AndroidMediaSink(
+        surface = null,
+        videoWidth = videoWidth,
+        videoHeight = videoHeight,
+        preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
+        advancedAudioChannelMapping = advancedAudioChannelMapping,
+        onScreenStreamActiveChanged = { type, active ->
+            onScreenStreamStateChanged(controllerGeneration, type, active)
+        },
+    )
+
+    private fun createMediaEngine(sink: AndroidMediaSink): CarPlayMediaEngine =
+        CarPlayMediaEngine(
+            sink = sink,
+            microphoneEnabled = microphoneAvailable,
+            audioCaptureDirectory = audioCaptureDirectory(),
+        )
+
+    private fun createSessionListener(controllerGeneration: Int): AirPlaySessionListener =
+        object : AirPlaySessionListener {
+            override fun onSessionActive(session: AirPlaySession) {
+                runOnUiThread {
+                    if (controllerGeneration != restartGeneration) {
+                        return@runOnUiThread
+                    }
+                    activeAirPlaySession = session
+                    syncAirPlayDarkMode()
+                    if (menuOpen) return@runOnUiThread
+                    appendLog("AirPlay session active")
+                }
+            }
+
+            override fun onSessionEnded(session: AirPlaySession) {
+                runOnUiThread {
+                    if (activeAirPlaySession === session) activeAirPlaySession = null
+                    if (menuOpen || controllerGeneration != restartGeneration) {
+                        return@runOnUiThread
+                    }
+                    activeScreenStreamTypes.clear()
+                    setConnectionStage("CarPlay session ended; reconnecting")
+                    appendLog("AirPlay session ended; reconnecting from scratch")
+                    reconnectAfterLoss("AirPlay session ended")
+                }
+            }
+
+            override fun onTransportError(message: String) {
+                runOnUiThread {
+                    if (menuOpen || controllerGeneration != restartGeneration) {
+                        return@runOnUiThread
+                    }
+                    activeScreenStreamTypes.clear()
+                    setConnectionStage("Transport error; reconnecting")
+                    appendLog("CarPlay transport error: $message; reconnecting from scratch")
+                    reconnectAfterLoss("CarPlay transport error: $message")
+                }
+            }
+        }
+
+    private fun createStatusReporter(
+        controllerGeneration: Int,
+    ): (CarPlayStatus) -> Unit = { status ->
+        if (!menuOpen && controllerGeneration == restartGeneration) {
+            updateHotspotStatus(status)
+            val description = status.describe()
+            setStatus(description)
+            when (status) {
+                is CarPlayStatus.Failed -> reconnectAfterLoss(description)
+                else -> Unit
+            }
+        }
+    }
+
+    private fun adoptBackgroundSession(): Boolean {
+        val snapshot = CarPlayBackgroundSession.snapshot() ?: return false
+        if (snapshot.controller.isClosed()) {
+            CarPlayBackgroundSession.clear(snapshot.controller)
+            return false
+        }
+        controller = snapshot.controller
+        sink = snapshot.sink
+        if (snapshot.width > 0 && snapshot.height > 0) {
+            activeDisplaySize = DisplaySize(snapshot.width, snapshot.height)
+        }
+        val generation = restartGeneration
+        snapshot.controller.attachUi(
+            createSessionListener(generation),
+            createStatusReporter(generation),
+        )
+        snapshot.sink.setScreenStreamActiveChangedListener { type, active ->
+            onScreenStreamStateChanged(restartGeneration, type, active)
+        }
+        currentSurface?.let(::attachSurface)
+        val serviceReused = snapshot.controller.hasActiveAirPlayAttachment()
+        appendLog(
+            if (serviceReused) {
+                "Reusing existing background CarPlay service"
+            } else {
+                "Reusing existing background CarPlay session"
+            },
+        )
+        setConnectionStage(
+            if (serviceReused) {
+                "CarPlay service already running"
+            } else {
+                "CarPlay session already running"
+            },
+        )
+        updateDebugOverlays()
+        return true
+    }
+
     private fun startCarPlay(size: DisplaySize) {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress || controller != null) return
         val controllerGeneration = restartGeneration
@@ -2278,23 +2382,14 @@ class CarPlayHostActivity : ComponentActivity() {
                 "microphone=${airPlayConfig.microphone} " +
                 "location=${config.locationReportingEnabled}",
         )
-        val renderer = AndroidMediaSink(
-            surface = null,
+        val renderer = createMediaSink(
             videoWidth = airPlayConfig.main.widthPixels,
             videoHeight = airPlayConfig.main.heightPixels,
-            preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
-            advancedAudioChannelMapping = advancedAudioChannelMapping,
-            onScreenStreamActiveChanged = { type, active ->
-                onScreenStreamStateChanged(controllerGeneration, type, active)
-            },
+            controllerGeneration = controllerGeneration,
         )
         sink = renderer
         currentSurface?.let(::attachSurface)
-        val media = CarPlayMediaEngine(
-            sink = renderer,
-            microphoneEnabled = microphoneAvailable,
-            audioCaptureDirectory = audioCaptureDirectory(),
-        )
+        val media = createMediaEngine(renderer)
         val pairings = AirPlayPersistence.loadPairings(this) { id, key ->
             AirPlayPersistence.savePairing(this, id, key)
         }
@@ -2304,62 +2399,16 @@ class CarPlayHostActivity : ComponentActivity() {
             airPlayConfig = airPlayConfig,
             identity = airPlayIdentity,
             pairings = pairings,
-            listener = object : AirPlaySessionListener {
-                override fun onSessionActive(session: AirPlaySession) {
-                    runOnUiThread {
-                        if (controllerGeneration != restartGeneration) {
-                            return@runOnUiThread
-                        }
-                        activeAirPlaySession = session
-                        syncAirPlayDarkMode()
-                        if (menuOpen) return@runOnUiThread
-                        appendLog("AirPlay session active")
-                    }
-                }
-
-                override fun onSessionEnded(session: AirPlaySession) {
-                    runOnUiThread {
-                        if (activeAirPlaySession === session) activeAirPlaySession = null
-                        if (menuOpen || controllerGeneration != restartGeneration) {
-                            return@runOnUiThread
-                        }
-                        activeScreenStreamTypes.clear()
-                        setConnectionStage("CarPlay session ended; reconnecting")
-                        appendLog("AirPlay session ended; reconnecting from scratch")
-                        reconnectAfterLoss("AirPlay session ended")
-                    }
-                }
-
-                override fun onTransportError(message: String) {
-                    runOnUiThread {
-                        if (menuOpen || controllerGeneration != restartGeneration) {
-                            return@runOnUiThread
-                        }
-                        activeScreenStreamTypes.clear()
-                        setConnectionStage("Transport error; reconnecting")
-                        appendLog("CarPlay transport error: $message; reconnecting from scratch")
-                        reconnectAfterLoss("CarPlay transport error: $message")
-                    }
-                }
-            },
+            listener = createSessionListener(controllerGeneration),
             media = media,
-            reportStatus = { status ->
-                if (!menuOpen && controllerGeneration == restartGeneration) {
-                    updateHotspotStatus(status)
-                    val description = status.describe()
-                    setStatus(description)
-                    when (status) {
-                        is CarPlayStatus.Failed -> reconnectAfterLoss(description)
-                        else -> Unit
-                    }
-                }
-            },
+            reportStatus = createStatusReporter(controllerGeneration),
             loadPairRecord = { AirPlayPersistence.loadLockdownRecord(this) },
             savePairRecord = { record -> AirPlayPersistence.saveLockdownRecord(this, record) },
             clearPairRecord = { AirPlayPersistence.clearLockdownRecord(this) },
             locationProvider = locationProvider,
         )
         controller = next
+        CarPlayBackgroundSession.store(next, renderer, size.width, size.height)
         next.start()
     }
 
@@ -2414,6 +2463,7 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun maybeStartCarPlay() {
+        if (controller == null && adoptBackgroundSession()) return
         val size = activeDisplaySize ?: return
         val transportReady = if (wirelessEnabled) wirelessPermissionsReady else vpnReady
         val locationReady = !locationReportingEnabled || locationPermissionAvailable
@@ -2436,7 +2486,7 @@ class CarPlayHostActivity : ComponentActivity() {
         restartCarPlay("Reconnecting after $reason")
     }
 
-    /** A resolution change requires a fresh /info advertisement, so rebuild the complete stack. */
+    /** Full-stack fallback when an AirPlay-only reconnect is unavailable. */
     private fun restartCarPlay(reason: String) {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress) return
         val size = activeDisplaySize ?: return
@@ -2447,6 +2497,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val generation = ++restartGeneration
         val oldController = controller
         val oldSink = sink
+        CarPlayBackgroundSession.clear(oldController)
         controller = null
         sink = null
         teardownExecutor.execute {
@@ -2471,6 +2522,7 @@ class CarPlayHostActivity : ComponentActivity() {
         controller?.sendTouch(emptyList())
         val oldController = controller
         val oldSink = sink
+        CarPlayBackgroundSession.clear(oldController)
         controller = null
         sink = null
         activeScreenStreamTypes.clear()
@@ -2551,6 +2603,7 @@ class CarPlayHostActivity : ComponentActivity() {
         mainHandler.removeCallbacks(applyDisplaySize)
         val oldController = controller
         val oldSink = sink
+        CarPlayBackgroundSession.clear(oldController)
         controller = null
         sink = null
         Log.i(TAG, "shutdown reason=$reason terminateProcess=$terminateProcess")
@@ -2789,4 +2842,43 @@ class CarPlayHostActivity : ComponentActivity() {
         val channel: Int? = null,
         val backend: String? = null,
     )
+}
+
+/** Process-local hand-off for keeping the CarPlay session alive while no Activity is visible. */
+private object CarPlayBackgroundSession {
+    data class Snapshot(
+        val controller: CarPlayController,
+        val sink: AndroidMediaSink,
+        val width: Int,
+        val height: Int,
+    )
+
+    private var controller: CarPlayController? = null
+    private var sink: AndroidMediaSink? = null
+    private var width = 0
+    private var height = 0
+
+    @Synchronized
+    fun snapshot(): Snapshot? {
+        val currentController = controller ?: return null
+        val currentSink = sink ?: return null
+        return Snapshot(currentController, currentSink, width, height)
+    }
+
+    @Synchronized
+    fun store(controller: CarPlayController, sink: AndroidMediaSink, width: Int, height: Int) {
+        this.controller = controller
+        this.sink = sink
+        this.width = width
+        this.height = height
+    }
+
+    @Synchronized
+    fun clear(expected: CarPlayController? = null) {
+        if (expected != null && controller !== expected) return
+        controller = null
+        sink = null
+        width = 0
+        height = 0
+    }
 }

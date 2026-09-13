@@ -49,8 +49,8 @@ class Iap2WirelessControlClient(
         var wifiConfigurationsSent = 0
         var carPlayStartSessionsSent = 0
         var locationActive = false
-        try {
-            while (true) {
+        var locationSentLogged = false
+        while (true) {
                 val remaining = remainingMillis(deadlineNanos)
                 if (remaining == 0L) {
                     return Iap2WirelessControlResult(
@@ -61,7 +61,10 @@ class Iap2WirelessControlClient(
                         carPlayStartSessionsSent,
                     )
                 }
-                if (locationActive) sendLatestLocation(locationProvider, deadlineNanos)
+                if (locationActive && sendLatestLocation(locationProvider, deadlineNanos) && !locationSentLogged) {
+                    locationSentLogged = true
+                    onProgress("iap2 tx=0xfffb location-information")
+                }
                 val pollTimeout = if (locationActive) {
                     min(remaining, LOCATION_POLL_INTERVAL_MILLIS)
                 } else {
@@ -110,12 +113,17 @@ class Iap2WirelessControlClient(
                     Iap2LocationMessages.START_LOCATION_INFORMATION -> {
                         onProgress("iap2 rx=0xfffa start-location-information")
                         locationActive = startLocationUpdates(locationProvider, onProgress)
-                        if (locationActive) sendLatestLocation(locationProvider, deadlineNanos)
+                        locationSentLogged = false
+                        if (locationActive && sendLatestLocation(locationProvider, deadlineNanos)) {
+                            locationSentLogged = true
+                            onProgress("iap2 tx=0xfffb location-information")
+                        }
                     }
 
                     Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
                         onProgress("iap2 rx=0xfffc stop-location-information")
                         locationActive = false
+                        locationSentLogged = false
                         locationProvider?.stop()
                     }
 
@@ -125,9 +133,6 @@ class Iap2WirelessControlClient(
                         forwardedFrames++
                     }
                 }
-            }
-        } finally {
-            locationProvider?.stop()
         }
     }
 
@@ -138,12 +143,13 @@ class Iap2WirelessControlClient(
     private fun sendLatestLocation(
         provider: Iap2LocationProvider?,
         deadlineNanos: Long,
-    ) {
-        val sentence = provider?.latestNmea() ?: return
+    ): Boolean {
+        val sentence = provider?.latestNmea() ?: return false
         channel.send(
             Iap2LocationMessages.locationInformation(sentence),
             requireRemaining(deadlineNanos),
         )
+        return true
     }
 
     private fun startLocationUpdates(

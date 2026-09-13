@@ -31,12 +31,14 @@ import com.shilapi.xcertplay.network.ManualHotspotManager
 import com.shilapi.xcertplay.network.WifiP2pGroupManager
 import com.shilapi.xcertplay.network.WirelessHotspotInfo
 import com.shilapi.xcertplay.network.WirelessHotspotManager
+import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import com.shilapi.xcertplay.transport.BluetoothRfcommDuplexStream
 import com.shilapi.xcertplay.transport.Ch341DeviceMatcher
 import com.shilapi.xcertplay.transport.Ch341I2cTransport
 import com.shilapi.xcertplay.transport.Ch341UsbHost
 import com.shilapi.xcertplay.transport.Ch341UsbSession
 import com.shilapi.xcertplay.transport.Iap2CsmChannel
+import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.Iap2LocationProvider
 import com.shilapi.xcertplay.transport.Iap2UsbMuxHost
 import com.shilapi.xcertplay.transport.Iap2UsbSession
@@ -116,9 +118,9 @@ class CarPlayController(
     private val airPlayConfig: AirPlayConfig,
     private val identity: AirPlayIdentity,
     private val pairings: PairingStore,
-    private val listener: AirPlaySessionListener,
+    listener: AirPlaySessionListener,
     private val media: AirPlayMediaHandler,
-    private val reportStatus: (CarPlayStatus) -> Unit,
+    reportStatus: (CarPlayStatus) -> Unit,
     private val loadPairRecord: () -> LockdownPairRecord? = { null },
     private val savePairRecord: (LockdownPairRecord) -> Unit = {},
     private val clearPairRecord: () -> Unit = {},
@@ -147,10 +149,13 @@ class CarPlayController(
     )
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val touchExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val tunnelExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val hostId = UUID.randomUUID().toString().uppercase(Locale.US)
     private val systemBuid = UUID.randomUUID().toString().uppercase(Locale.US)
     private val lifecycleLock = Any()
+    @Volatile private var uiListener: AirPlaySessionListener? = listener
+    @Volatile private var uiStatusReporter: ((CarPlayStatus) -> Unit)? = reportStatus
     private val permissionGrant = AtomicBoolean(false)
     private val availabilityPollGeneration = AtomicInteger(0)
     private var permissionPollGeneration = 0
@@ -169,6 +174,9 @@ class CarPlayController(
     @Volatile private var bonjour: CarPlayBonjour? = null
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
+    @Volatile private var wirelessTunnelChannel: Iap2CsmChannel? = null
+    @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
+    @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: CarPlayVpnService? = null
     @Volatile private var vpnBound = false
     private val wirelessHandoffRequested = AtomicBoolean(false)
@@ -195,22 +203,25 @@ class CarPlayController(
     private val sessionListener = object : AirPlaySessionListener {
         override fun onSessionActive(session: AirPlaySession) {
             activeSession = session
-            listener.onSessionActive(session)
+            uiListener?.onSessionActive(session)
         }
 
         override fun onSessionEnded(session: AirPlaySession) {
             if (activeSession === session) activeSession = null
-            listener.onSessionEnded(session)
+            uiListener?.onSessionEnded(session)
         }
 
-        override fun onTransportError(message: String) =
-            listener.onTransportError(message)
+        override fun onTransportError(message: String) {
+            uiListener?.onTransportError(message)
+        }
 
-        override fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) =
-            listener.onDeviceInfo(session, info)
+        override fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {
+            uiListener?.onDeviceInfo(session, info)
+        }
 
-        override fun onHostUiRequested(session: AirPlaySession) =
-            listener.onHostUiRequested(session)
+        override fun onHostUiRequested(session: AirPlaySession) {
+            uiListener?.onHostUiRequested(session)
+        }
 
         override fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {
             if (
@@ -223,8 +234,25 @@ class CarPlayController(
                 closeBestEffort("wireless CSM") { csm?.close() }
                 closeBestEffort("wireless RFCOMM stream") { bluetoothStream?.close() }
             }
-            listener.onCommand(session, type, params)
+            uiListener?.onCommand(session, type, params)
         }
+    }
+
+    fun attachUi(
+        listener: AirPlaySessionListener,
+        reportStatus: (CarPlayStatus) -> Unit,
+    ) {
+        uiListener = listener
+        uiStatusReporter = reportStatus
+        mainHandler.post {
+            if (uiListener === listener) lastReportedStatus?.let(reportStatus)
+        }
+    }
+
+    fun isClosed(): Boolean = closed
+
+    fun hasActiveAirPlayAttachment(): Boolean = synchronized(lifecycleLock) {
+        !closed && vpnService?.isAttached() == true
     }
 
     fun start() {
@@ -278,6 +306,7 @@ class CarPlayController(
         wirelessGeneration.incrementAndGet()
         permissionPollGeneration += 1
         touchExecutor.shutdownNow()
+        tunnelExecutor.shutdownNow()
         val service = vpnService
         unbindVpn()
         Thread(
@@ -296,6 +325,8 @@ class CarPlayController(
                     }
                     closeBestEffort("MFi") { mfiSession?.close() }
                     mfiSession = null
+                    wirelessIdentification = null
+                    wirelessAirPlayEndpoint = null
                     closeBestEffort("location provider") { locationProvider?.close() }
                 } finally {
                     executor.shutdownNow()
@@ -452,6 +483,19 @@ class CarPlayController(
     }
 
     private fun startPhone() {
+        if (config.locationReportingEnabled) {
+            val started = try {
+                locationProvider?.start() == true
+            } catch (error: Throwable) {
+                Log.w(
+                    IphoneCarPlayConfiguration.TAG,
+                    "Could not prewarm the Android location provider",
+                    error,
+                )
+                false
+            }
+            Log.i(IphoneCarPlayConfiguration.TAG, "location provider prewarmed=$started")
+        }
         if (config.transport == CarPlayTransport.WIRELESS) {
             startWireless()
         } else {
@@ -616,6 +660,9 @@ class CarPlayController(
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
             )
+            wirelessIdentification = identification
+            wirelessAirPlayEndpoint = endpoint
+            media.setIapTunnelHandler(::startWirelessTunnelControl)
 
             onStatus(CarPlayStatus.RunningWireless)
             val result = Iap2WirelessControlClient(
@@ -651,6 +698,63 @@ class CarPlayController(
                 closeWirelessStack()
                 fail(error)
             }
+        }
+    }
+
+    private fun startWirelessTunnelControl(stream: BlockingDuplexByteStream): Boolean {
+        if (closed || config.transport != CarPlayTransport.WIRELESS) return false
+        val identification = wirelessIdentification ?: return false
+        val endpoint = wirelessAirPlayEndpoint ?: return false
+        val mfi = mfiSession?.client ?: return false
+        val channel = try {
+            Iap2CsmChannel.openWireless(stream)
+        } catch (error: Throwable) {
+            Log.w(IphoneCarPlayConfiguration.TAG, "Could not open the tunneled iAP2 link", error)
+            return false
+        }
+        wirelessTunnelChannel = channel
+        val generation = wirelessGeneration.get()
+        Log.i(IphoneCarPlayConfiguration.TAG, "wireless iAP2 tunnel control starting")
+        return try {
+            tunnelExecutor.execute {
+                try {
+                    val result = Iap2WirelessControlClient(
+                        channel = channel,
+                        mfi = Iap2MfiAuthenticationClient(mfi),
+                    ).run(
+                        identification = identification,
+                        endpoint = endpoint,
+                        timeoutMillis = controlLoopTimeoutMillis(),
+                        locationProvider = locationProvider,
+                        onProgress = { message ->
+                            Log.i(IphoneCarPlayConfiguration.TAG, "iAP tunnel $message")
+                        },
+                    )
+                    if (closed || generation != wirelessGeneration.get()) return@execute
+                    when (result.terminal) {
+                        Iap2WirelessControlTerminal.TIMED_OUT ->
+                            onStatus(CarPlayStatus.ControlEnded)
+                        Iap2WirelessControlTerminal.CHANNEL_CLOSED ->
+                            onStatus(CarPlayStatus.Failed("Wireless iAP2 tunnel closed"))
+                    }
+                } catch (error: Throwable) {
+                    if (!closed && generation == wirelessGeneration.get()) {
+                        onStatus(
+                            CarPlayStatus.Failed(
+                                error.message ?: error.javaClass.simpleName,
+                            ),
+                        )
+                    }
+                } finally {
+                    if (wirelessTunnelChannel === channel) wirelessTunnelChannel = null
+                }
+            }
+            true
+        } catch (error: Throwable) {
+            if (wirelessTunnelChannel === channel) wirelessTunnelChannel = null
+            closeBestEffort("tunneled iAP2 link") { channel.close() }
+            Log.w(IphoneCarPlayConfiguration.TAG, "iAP2 tunnel executor rejected the link", error)
+            false
         }
     }
 
@@ -1003,6 +1107,11 @@ class CarPlayController(
     }
 
     private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
+        media.setIapTunnelHandler(null)
+        val activeTunnel = wirelessTunnelChannel
+        wirelessTunnelChannel = null
+        if (activeTunnel != null) closeBestEffort("tunneled iAP2 link") { activeTunnel.close() }
+
         val activeCsm = csm
         csm = null
         if (activeCsm != null) closeBestEffort("wireless CSM") { activeCsm.close() }
@@ -1022,6 +1131,8 @@ class CarPlayController(
         val activeHotspot = hotspot
         hotspot = null
         if (activeHotspot != null) closeBestEffort("wireless hotspot") { activeHotspot.close() }
+        wirelessIdentification = null
+        wirelessAirPlayEndpoint = null
 
         if (service != null) closeBestEffort("AirPlay service") { service.detach() }
     }
@@ -1151,7 +1262,7 @@ class CarPlayController(
         mainHandler.post {
             if (!closed && status != lastReportedStatus) {
                 lastReportedStatus = status
-                reportStatus(status)
+                uiStatusReporter?.invoke(status)
             }
         }
     }

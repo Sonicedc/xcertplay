@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.airplay
 
 import android.util.Log
 import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
@@ -40,6 +41,7 @@ interface AirPlayMediaHandler {
     fun onFeedback(session: AirPlaySession): Map<String, Any?>? = null
     fun onTeardown(session: AirPlaySession, type: Int) {}
     fun onSessionClosed(session: AirPlaySession) {}
+    fun setIapTunnelHandler(handler: ((BlockingDuplexByteStream) -> Boolean)?) {}
 }
 
 /**
@@ -174,6 +176,14 @@ class AirPlaySession(
         sendCommand(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 2)))
         sendCommand(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 3)))
     }
+
+    fun sendIapMessage(data: ByteArray): Boolean =
+        sendCommand(
+            linkedMapOf(
+                "type" to "iAPSendMessage",
+                "params" to linkedMapOf("data" to data),
+            ),
+        )
 
     fun setNightMode(night: Boolean): Boolean = synchronized(eventWriteLock) {
         pendingNightMode = night

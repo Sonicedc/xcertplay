@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.util.Log
+import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import java.io.Closeable
 import java.io.File
 import java.math.BigInteger
@@ -43,6 +44,11 @@ class CarPlayMediaEngine(
     private val audioMeta = ConcurrentHashMap<Int, AudioMeta>()
     private val pendingMicrophone = ConcurrentHashMap<Int, MicrophoneConfig>()
     private val audioCaptures = ConcurrentHashMap<Int, AudioPacketCapture>()
+    @Volatile private var iapTunnelHandler: ((BlockingDuplexByteStream) -> Boolean)? = null
+
+    override fun setIapTunnelHandler(handler: ((BlockingDuplexByteStream) -> Boolean)?) {
+        iapTunnelHandler = handler
+    }
 
     override fun onScreen(session: AirPlaySession, type: Int, stream: Map<String, Any?>): Int? {
         val key = outputKey(session, stream) ?: return null
@@ -141,17 +147,36 @@ class CarPlayMediaEngine(
             32,
         )
         val tunnel = IapTunnel(key)
-        val port = tunnel.listen(object : IapTunnel.Listener {
-            override fun onIap(bytes: ByteArray) = sink.onIapMessage(bytes)
-            override fun onClosed(cause: Throwable?) {
-                Log.w(
-                    TAG,
-                    "iAP tunnel ended reason=${cause?.message ?: "peer EOF"}",
+        val bridge = AirPlayIapTunnelStream(session, tunnel)
+        val attached = try {
+            iapTunnelHandler?.invoke(bridge) == true
+        } catch (error: Throwable) {
+            Log.w(TAG, "iAP tunnel relay attachment failed", error)
+            false
+        }
+        val port = try {
+            if (attached) {
+                bridge.listen()
+            } else {
+                tunnel.listen(
+                    object : IapTunnel.Listener {
+                        override fun onIap(bytes: ByteArray) = sink.onIapMessage(bytes)
+
+                        override fun onClosed(cause: Throwable?) {
+                            Log.w(
+                                TAG,
+                                "iAP tunnel ended reason=${cause?.message ?: "peer EOF"}",
+                            )
+                            session.close()
+                        }
+                    },
                 )
-                session.close()
             }
-        })
-        streams[STREAM_TYPE_DATA] = tunnel
+        } catch (error: Throwable) {
+            bridge.close()
+            throw error
+        }
+        streams[STREAM_TYPE_DATA] = if (attached) bridge else tunnel
         return linkedMapOf("type" to STREAM_TYPE_DATA, "streamID" to 1L, "dataPort" to port)
     }
 
