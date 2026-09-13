@@ -24,10 +24,10 @@ import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Owns the Android VPN tunnel, the NCM IPv6 bridge, and the AirPlay TCP :7000 listener.
+ * Hosts the AirPlay TCP listener for both NCM/VPN and local-only Wi-Fi transports.
  *
- * The caller binds to this service and calls [attach] after Android USB Host brought the NCM
- * bridge up. VPN consent is requested with [prepare] before binding.
+ * The wired path also owns the Android VPN tunnel and NCM IPv6 bridge. VPN consent is requested
+ * with [prepare] before binding.
  */
 class CarPlayVpnService : VpnService() {
     inner class LocalBinder : Binder() {
@@ -92,16 +92,7 @@ class CarPlayVpnService : VpnService() {
             ipv6Bridge.start()
             bridge = ipv6Bridge
 
-            val server = ServerSocket()
-            server.bind(InetSocketAddress(address, config.port))
-            serverSocket = server
-            Thread(
-                { acceptLoop(generation, server, config, identity, pairings, mfi, listener, media) },
-                "airplay-accept",
-            ).apply {
-                isDaemon = true
-                start()
-            }
+            startAirPlayServer(generation, address, config, identity, pairings, mfi, listener, media)
             AttachResult.Started
         } catch (error: Exception) {
             releaseLocked()
@@ -109,7 +100,36 @@ class CarPlayVpnService : VpnService() {
         }
     }
 
-    /** Releases the active AirPlay listener, VPN and NCM transport while the service stays bound. */
+    /**
+     * Starts the AirPlay listener on the local-only Wi-Fi AP address without establishing a VPN or
+     * NCM bridge.
+     */
+    @Synchronized
+    fun attachWireless(
+        bindAddress: InetAddress,
+        config: AirPlayConfig,
+        identity: AirPlayIdentity,
+        pairings: PairingStore,
+        mfi: MfiAuthenticationClient?,
+        listener: AirPlaySessionListener,
+        media: AirPlayMediaHandler,
+    ): AttachResult {
+        if (active.get()) {
+            Log.i(TAG, "replacing stale local-only Wi-Fi attachment")
+            releaseLocked()
+        }
+        active.set(true)
+        val generation = ++attachGeneration
+        return try {
+            startAirPlayServer(generation, bindAddress, config, identity, pairings, mfi, listener, media)
+            AttachResult.Started
+        } catch (error: Exception) {
+            releaseLocked()
+            AttachResult.Failed(error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    /** Releases the active AirPlay listener and whichever VPN/NCM transport resources are active. */
     @Synchronized
     fun detach() {
         releaseLocked()
@@ -118,6 +138,28 @@ class CarPlayVpnService : VpnService() {
     override fun onDestroy() {
         detach()
         super.onDestroy()
+    }
+
+    private fun startAirPlayServer(
+        generation: Int,
+        address: InetAddress,
+        config: AirPlayConfig,
+        identity: AirPlayIdentity,
+        pairings: PairingStore,
+        mfi: MfiAuthenticationClient?,
+        listener: AirPlaySessionListener,
+        media: AirPlayMediaHandler,
+    ) {
+        val server = ServerSocket()
+        server.bind(InetSocketAddress(address, config.port))
+        serverSocket = server
+        Thread(
+            { acceptLoop(generation, server, config, identity, pairings, mfi, listener, media) },
+            "airplay-accept",
+        ).apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun acceptLoop(
@@ -190,7 +232,7 @@ class CarPlayVpnService : VpnService() {
         }
     }
 
-    /** Caller must hold this service's monitor. */
+    /** Caller must hold this service's monitor. Closes only resources active for this attachment. */
     private fun releaseLocked() {
         attachGeneration += 1
         active.set(false)

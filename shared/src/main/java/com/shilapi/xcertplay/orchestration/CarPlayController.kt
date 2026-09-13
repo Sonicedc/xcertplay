@@ -1,5 +1,9 @@
 package com.shilapi.xcertplay.orchestration
 
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothSocket
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -20,7 +24,10 @@ import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
+import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
+import com.shilapi.xcertplay.transport.BluetoothRfcommDuplexStream
 import com.shilapi.xcertplay.transport.Ch341DeviceMatcher
 import com.shilapi.xcertplay.transport.Ch341I2cTransport
 import com.shilapi.xcertplay.transport.Ch341UsbHost
@@ -31,6 +38,10 @@ import com.shilapi.xcertplay.transport.Iap2UsbSession
 import com.shilapi.xcertplay.transport.Iap2WiredCarPlayEndpoint
 import com.shilapi.xcertplay.transport.Iap2WiredControlClient
 import com.shilapi.xcertplay.transport.Iap2WiredControlTerminal
+import com.shilapi.xcertplay.transport.Iap2WirelessCarPlayEndpoint
+import com.shilapi.xcertplay.transport.Iap2WirelessControlClient
+import com.shilapi.xcertplay.transport.Iap2WirelessControlTerminal
+import com.shilapi.xcertplay.transport.Iap2WirelessIdentification
 import com.shilapi.xcertplay.transport.I2cTransportException
 import com.shilapi.xcertplay.transport.IphoneCarPlayConfiguration
 import com.shilapi.xcertplay.transport.IphoneUsbException
@@ -43,6 +54,9 @@ import com.shilapi.xcertplay.transport.LockdownPairRecord
 import com.shilapi.xcertplay.transport.NcmFunctionDiscovery
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.io.Closeable
+import java.io.IOException
+import java.net.InetAddress
+import java.net.Inet6Address
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -57,6 +71,18 @@ sealed class CarPlayStatus {
     data object WaitingForMfi : CarPlayStatus()
     data object RequestingMfiPermission : CarPlayStatus()
     data object MfiReady : CarPlayStatus()
+    data object StartingHotspot : CarPlayStatus()
+    data class HotspotReady(
+        val ssid: String,
+        val band: String,
+        val channel: Int,
+        val bssid: String,
+        val address: String,
+    ) : CarPlayStatus()
+    data object WaitingForPairedIphone : CarPlayStatus()
+    data object ConnectingBluetooth : CarPlayStatus()
+    data object RunningWireless : CarPlayStatus()
+    data object WirelessActive : CarPlayStatus()
     data object DiscoveringIphone : CarPlayStatus()
     data object WaitingForIphone : CarPlayStatus()
     data object RequestingIphonePermission : CarPlayStatus()
@@ -72,8 +98,8 @@ sealed class CarPlayStatus {
 }
 
 /**
- * Wires the complete wired CarPlay path: MFi coprocessor discovery, iPhone USB bring-up, USBMUX,
- * Lockdown pairing, iAP2 control, NCM/VPN transport, and the AirPlay media/input sessions.
+ * Wires the complete wired or wireless CarPlay path: MFi coprocessor discovery, iPhone bring-up,
+ * iAP2 control, transport setup, and the AirPlay media/input sessions.
  *
  * All blocking USB/I2C work runs on one worker executor. Status callbacks are delivered on the
  * main thread. This class is the integration seam only and is not evidence of hardware operation.
@@ -91,10 +117,12 @@ class CarPlayController(
     private val savePairRecord: (LockdownPairRecord) -> Unit = {},
     private val clearPairRecord: () -> Unit = {},
 ) : Closeable {
-    private enum class Phase { IDLE, MFI, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
+    private enum class Phase { IDLE, MFI, WIRELESS, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
     private val appContext = context.applicationContext
     private val usbManager = context.getSystemService(UsbManager::class.java)
+    private val bluetoothAdapter =
+        appContext.getSystemService(BluetoothManager::class.java)?.adapter
     private val iphoneHost = IphoneUsbHost(
         appContext,
         usbManager,
@@ -124,8 +152,14 @@ class CarPlayController(
     @Volatile private var mux: Iap2UsbMuxHost? = null
     @Volatile private var csm: Iap2CsmChannel? = null
     @Volatile private var activeSession: AirPlaySession? = null
+    @Volatile private var hotspot: LocalOnlyHotspotManager? = null
+    @Volatile private var bonjour: CarPlayBonjour? = null
+    @Volatile private var bluetoothSocket: BluetoothSocket? = null
+    @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
     @Volatile private var vpnService: CarPlayVpnService? = null
     @Volatile private var vpnBound = false
+    private val wirelessHandoffRequested = AtomicBoolean(false)
+    private val wirelessGeneration = AtomicInteger(0)
 
     private var permissionCloseable: Closeable? = null
     private var attachCloseable: Closeable? = null
@@ -165,16 +199,29 @@ class CarPlayController(
         override fun onHostUiRequested(session: AirPlaySession) =
             listener.onHostUiRequested(session)
 
-        override fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) =
+        override fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {
+            if (
+                config.transport == CarPlayTransport.WIRELESS &&
+                !closed &&
+                isBluetoothHandoffCommand(type) &&
+                wirelessHandoffRequested.compareAndSet(false, true)
+            ) {
+                Log.i(IphoneCarPlayConfiguration.TAG, "wireless CarPlay Bluetooth handoff requested")
+                closeBestEffort("wireless CSM") { csm?.close() }
+                closeBestEffort("wireless RFCOMM stream") { bluetoothStream?.close() }
+            }
             listener.onCommand(session, type, params)
+        }
     }
 
     fun start() {
         synchronized(this) {
             if (closed) return
         }
-        permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
-        attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
+        if (config.transport == CarPlayTransport.WIRED) {
+            permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
+            attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
+        }
         startMfi()
     }
 
@@ -190,6 +237,8 @@ class CarPlayController(
         if (closed) return
         if (mfiSession == null) {
             startMfi()
+        } else if (config.transport == CarPlayTransport.WIRELESS) {
+            restartWireless()
         } else {
             startIphone()
         }
@@ -213,6 +262,7 @@ class CarPlayController(
         }
         closeReceivers()
         availabilityPollGeneration.incrementAndGet()
+        wirelessGeneration.incrementAndGet()
         permissionPollGeneration += 1
         touchExecutor.shutdownNow()
         val service = vpnService
@@ -220,11 +270,17 @@ class CarPlayController(
         Thread(
             {
                 try {
-                    closeBestEffort("CSM") { csm?.close() }
-                    csm = null
+                    if (config.transport == CarPlayTransport.WIRELESS) {
+                        closeBestEffort("wireless stack") { closeWirelessStack(service) }
+                    } else {
+                        closeBestEffort("CSM") { csm?.close() }
+                        csm = null
+                    }
                     closeBestEffort("USBMUX") { mux?.close() }
                     mux = null
-                    closeBestEffort("VPN/NCM") { service?.detach() }
+                    if (config.transport == CarPlayTransport.WIRED) {
+                        closeBestEffort("VPN/NCM") { service?.detach() }
+                    }
                     closeBestEffort("MFi") { mfiSession?.close() }
                     mfiSession = null
                 } finally {
@@ -292,7 +348,7 @@ class CarPlayController(
                 try {
                     mfiSession = MfiSession(MfiRuntime.scan(transport), transport)
                     onStatus(CarPlayStatus.MfiReady)
-                    startIphone()
+                    startPhone()
                 } catch (error: Throwable) {
                     transport.close()
                     throw error
@@ -356,7 +412,7 @@ class CarPlayController(
                         )
                         mfiSession = MfiSession(client, session)
                         onStatus(CarPlayStatus.MfiReady)
-                        startIphone()
+                        startPhone()
                     } catch (_: MfiCoprocessorNotFoundException) {
                         session.close()
                         waitForMfi()
@@ -378,6 +434,207 @@ class CarPlayController(
         onStatus(CarPlayStatus.WaitingForMfi)
         scheduleAvailabilityPoll(Phase.MFI) {
             ch341Host?.let(::checkCh341Mfi) ?: openLinuxMfi()
+        }
+    }
+
+    private fun startPhone() {
+        if (config.transport == CarPlayTransport.WIRELESS) {
+            startWireless()
+        } else {
+            startIphone()
+        }
+    }
+
+    private fun startWireless() {
+        availabilityPollGeneration.incrementAndGet()
+        phase = Phase.WIRELESS
+        wirelessHandoffRequested.set(false)
+        onStatus(CarPlayStatus.StartingHotspot)
+        val generation = wirelessGeneration.incrementAndGet()
+        executor.execute {
+            runWireless(generation)
+        }
+    }
+
+    private fun restartWireless() {
+        wirelessGeneration.incrementAndGet()
+        Thread(
+            {
+                closeWirelessStack()
+                if (!closed) startWireless()
+            },
+            "xcertplay-wireless-restart",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun runWireless(generation: Int) {
+        try {
+            closeWirelessStack()
+            if (
+                closed ||
+                phase != Phase.WIRELESS ||
+                generation != wirelessGeneration.get()
+            ) {
+                return
+            }
+
+            val mfi = mfiSession?.client
+                ?: throw IOException("MFi coprocessor client is unavailable")
+            val manager = LocalOnlyHotspotManager(appContext)
+            hotspot = manager
+            val hotspotInfo = manager.start(HOTSPOT_START_TIMEOUT_MILLIS)
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+            val hostAddress = hotspotInfo.hostAddress
+                ?: throw IOException(
+                    "LocalOnlyHotspot did not provide a usable host address",
+                )
+            if (
+                hostAddress is Inet6Address &&
+                (!hostAddress.isLinkLocalAddress || hostAddress.scopeId == 0)
+            ) {
+                throw IOException(
+                    "LocalOnlyHotspot link-local IPv6 address is not scoped",
+                )
+            }
+            val hostAddressText = hostAddressText(hostAddress)
+            val deviceIdentifier = hotspotInfo.bssid ?: airPlayConfig.deviceId
+            Log.i(
+                IphoneCarPlayConfiguration.TAG,
+                "wireless hotspot iface=${hotspotInfo.interfaceName ?: "unknown"} " +
+                    "host=$hostAddressText bssid=${hotspotInfo.bssid ?: "unavailable"} " +
+                    "channel=${hotspotInfo.channel}",
+            )
+            onStatus(
+                CarPlayStatus.HotspotReady(
+                    ssid = hotspotInfo.ssid,
+                    band = hotspotInfo.bandLabel,
+                    channel = hotspotInfo.channel,
+                    bssid = deviceIdentifier,
+                    address = hostAddressText,
+                ),
+            )
+            onStatus(CarPlayStatus.WaitingForPairedIphone)
+
+            val adapter = bluetoothAdapter
+                ?: throw IOException("Bluetooth adapter is unavailable")
+            if (!adapter.isEnabled) throw IOException("Bluetooth is not enabled")
+            val device = selectWirelessBluetoothDevice(adapter)
+            val hostBluetoothMac = accessoryBluetoothMac(adapter)
+            val wirelessAirPlayConfig = airPlayConfig.copy(
+                deviceId = deviceIdentifier,
+                btMac = hostBluetoothMac,
+            )
+
+            onStatus(CarPlayStatus.AttachingNetwork)
+            val service = awaitVpnService()
+                ?: throw IOException("Could not bind the CarPlay AirPlay service")
+            when (
+                val result = service.attachWireless(
+                    bindAddress = hostAddress,
+                    config = wirelessAirPlayConfig,
+                    identity = identity,
+                    pairings = pairings,
+                    mfi = mfi,
+                    listener = sessionListener,
+                    media = media,
+                )
+            ) {
+                CarPlayVpnService.AttachResult.Started -> Unit
+                CarPlayVpnService.AttachResult.AlreadyStarted ->
+                    throw IOException("Wireless AirPlay transport is already attached")
+                is CarPlayVpnService.AttachResult.Failed ->
+                    throw IOException(result.message)
+            }
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+
+            val bonjourClient = CarPlayBonjour(
+                context = appContext,
+                config = wirelessAirPlayConfig,
+                identity = identity,
+                advertisedHost = hostAddress.hostAddress,
+                onEvent = { event ->
+                    Log.i(IphoneCarPlayConfiguration.TAG, "wireless bonjour: $event")
+                },
+            )
+            bonjour = bonjourClient
+            bonjourClient.start()
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+
+            onStatus(CarPlayStatus.ConnectingBluetooth)
+            val socket = device
+                    .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
+                    .also { bluetoothSocket = it }
+            socket.connect()
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+            val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+            val channel = Iap2CsmChannel.openWireless(stream).also { csm = it }
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+            val identification = config.identification.copy(
+                wireless = Iap2WirelessIdentification(hostBluetoothMac, hotspotInfo.ssid),
+            )
+            val endpoint = Iap2WirelessCarPlayEndpoint(
+                ssid = hotspotInfo.ssid,
+                passphrase = hotspotInfo.passphrase,
+                channel = hotspotInfo.channel,
+                security = hotspotInfo.security,
+                ipAddresses = listOf(hostAddressText),
+                airPlayPort = airPlayConfig.port,
+                deviceIdentifier = deviceIdentifier,
+                publicKey = identity.publicKeyHex,
+                sourceVersion = airPlayConfig.sourceVersion,
+            )
+
+            onStatus(CarPlayStatus.RunningWireless)
+            val result = Iap2WirelessControlClient(
+                channel = channel,
+                mfi = Iap2MfiAuthenticationClient(mfi),
+            ).run(
+                identification = identification,
+                endpoint = endpoint,
+                timeoutMillis = CONTROL_LOOP_TIMEOUT_MILLIS,
+                onProgress = { message ->
+                    Log.i(IphoneCarPlayConfiguration.TAG, message)
+                },
+            )
+            if (isStaleWirelessRun(generation)) {
+                closeWirelessStack()
+                return
+            }
+            when (result.terminal) {
+                Iap2WirelessControlTerminal.CHANNEL_CLOSED -> {
+                    if (!wirelessHandoffRequested.get()) {
+                        throw IOException(
+                            "Wireless CarPlay control channel closed unexpectedly",
+                        )
+                    }
+                    onStatus(CarPlayStatus.WirelessActive)
+                }
+                Iap2WirelessControlTerminal.TIMED_OUT ->
+                    onStatus(CarPlayStatus.ControlEnded)
+            }
+        } catch (error: Throwable) {
+            if (!closed && generation == wirelessGeneration.get()) {
+                closeWirelessStack()
+                fail(error)
+            }
         }
     }
 
@@ -648,6 +905,79 @@ class CarPlayController(
         return false
     }
 
+    private fun isBluetoothHandoffCommand(type: String): Boolean =
+        type.equals("disableBluetooth", ignoreCase = true) ||
+            type.equals("disable-bluetooth", ignoreCase = true)
+
+    private fun isStaleWirelessRun(generation: Int): Boolean =
+        closed || phase != Phase.WIRELESS || generation != wirelessGeneration.get()
+
+    private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
+        config.wirelessBluetoothAddress?.let { return adapter.getRemoteDevice(it) }
+
+        val bonded = adapter.bondedDevices.orEmpty()
+        val iPhones = bonded.filter { device ->
+            device.name?.contains("iPhone", ignoreCase = true) == true
+        }
+        if (iPhones.size == 1) return iPhones.single()
+        if (iPhones.size > 1) {
+            throw IOException(
+                "Multiple bonded iPhones found; set wirelessBluetoothAddress explicitly",
+            )
+        }
+        if (bonded.size == 1) return bonded.single()
+        throw IOException(
+            "No unambiguous bonded iPhone found; pair one or set wirelessBluetoothAddress",
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun accessoryBluetoothMac(adapter: BluetoothAdapter): String {
+        val address = try {
+            adapter.address
+        } catch (_: SecurityException) {
+            null
+        }
+        return address
+            ?.takeIf {
+                BLUETOOTH_ADDRESS.matches(it) &&
+                    !it.equals(ADAPTER_ADDRESS_PLACEHOLDER, ignoreCase = true)
+            }
+            ?: airPlayConfig.btMac
+    }
+
+    private fun hostAddressText(address: InetAddress): String {
+        val text = address.hostAddress?.substringBefore('%')
+        if (text.isNullOrBlank()) {
+            throw IOException("LocalOnlyHotspot host address is unavailable")
+        }
+        return text
+    }
+
+    private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
+        val activeCsm = csm
+        csm = null
+        if (activeCsm != null) closeBestEffort("wireless CSM") { activeCsm.close() }
+
+        val activeStream = bluetoothStream
+        bluetoothStream = null
+        if (activeStream != null) closeBestEffort("wireless RFCOMM stream") { activeStream.close() }
+
+        val activeSocket = bluetoothSocket
+        bluetoothSocket = null
+        if (activeSocket != null) closeBestEffort("wireless Bluetooth socket") { activeSocket.close() }
+
+        val activeBonjour = bonjour
+        bonjour = null
+        if (activeBonjour != null) closeBestEffort("Bonjour") { activeBonjour.close() }
+
+        val activeHotspot = hotspot
+        hotspot = null
+        if (activeHotspot != null) closeBestEffort("LocalOnlyHotspot") { activeHotspot.close() }
+
+        if (service != null) closeBestEffort("AirPlay service") { service.detach() }
+    }
+
     private fun closeBestEffort(name: String, close: () -> Unit) {
         try {
             close()
@@ -776,6 +1106,8 @@ class CarPlayController(
     }
 
     companion object {
+        private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
+        private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
@@ -784,6 +1116,7 @@ class CarPlayController(
         private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
-
+        private const val ADAPTER_ADDRESS_PLACEHOLDER = "02:00:00:00:00:00"
+        private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
     }
 }

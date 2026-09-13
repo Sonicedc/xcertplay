@@ -5,6 +5,11 @@ import com.shilapi.xcertplay.transport.UsbDeviceId
 import java.net.Inet6Address
 import java.net.InetAddress
 
+enum class CarPlayTransport {
+    WIRED,
+    WIRELESS,
+}
+
 /**
  * Deployment-owned constants for one head unit. There are deliberately no built-in Apple or
  * CH341 product IDs: the physical devices attached to the target must be identified first.
@@ -20,6 +25,8 @@ class CarPlayRuntimeConfig(
     val availableCurrentMilliAmps: Int = 2400,
     val label: String = "xcertplay",
     val hostName: String = "xcertplay",
+    val transport: CarPlayTransport = CarPlayTransport.WIRED,
+    val wirelessBluetoothAddress: String? = null,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {
@@ -38,11 +45,15 @@ class CarPlayRuntimeConfig(
         require(ch341MfiResetGpio == null || ch341MfiResetGpio in 0..5) {
             "CH341 MFi reset GPIO must be D0..D5"
         }
+        require(wirelessBluetoothAddress == null || BLUETOOTH_ADDRESS.matches(wirelessBluetoothAddress)) {
+            "wirelessBluetoothAddress must be six colon-separated hexadecimal bytes"
+        }
     }
 
     companion object {
         const val APPLE_VENDOR_ID = 0x05ac
         val DEFAULT_HOST_MAC = byteArrayOf(0x02, 0x00, 0x00, 0x00, 0x00, 0x02)
+        private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
         private fun isLinkLocalIpv6(value: String): Boolean {
             if (value.contains('%') || '\u0000' in value || !value.contains(':')) return false

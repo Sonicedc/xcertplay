@@ -5,7 +5,7 @@ import java.util.ArrayDeque
 import kotlin.math.min
 
 /**
- * Blocking facade for the wired iAP2 link over a caller-supplied CarKit byte stream.
+ * Blocking facade for an iAP2 link over a caller-supplied byte stream.
  *
  * [open] starts one worker.  That worker is the only code that drives [Iap2LinkEngine] or calls
  * [BlockingDuplexByteStream.send]/[BlockingDuplexByteStream.recv].  Callers may concurrently wait
@@ -17,6 +17,8 @@ import kotlin.math.min
  */
 class Iap2LinkChannel private constructor(
     private val underlying: BlockingDuplexByteStream,
+    private val linkConfig: Iap2LinkConfig,
+    private val initiateNegotiation: Boolean,
 ) : AutoCloseable {
     private data class Command(val control: ByteArray)
 
@@ -138,9 +140,9 @@ class Iap2LinkChannel private constructor(
     }
 
     private fun runPump() {
-        val engine = Iap2LinkEngine(WIRED_LINK_CONFIG)
+        val engine = Iap2LinkEngine(linkConfig)
         try {
-            engine.start(wiredInitiator = true, nowMillis = nowMillis())
+            engine.start(wiredInitiator = initiateNegotiation, nowMillis = nowMillis())
             while (!isClosing()) {
                 drainCommands(engine)
                 engine.advanceTime(nowMillis())
@@ -342,10 +344,23 @@ class Iap2LinkChannel private constructor(
             controlSessionVersion = 2,
             zeroAcknowledgements = true,
         )
+        private val WIRELESS_LINK_CONFIG = Iap2LinkConfig(
+            maxOutgoing = 4,
+            controlSessionVersion = 2,
+        )
 
         /** Opens and immediately starts a wired iAP2 link, taking ownership of the supplied stream. */
         fun open(underlying: BlockingDuplexByteStream): Iap2LinkChannel =
-            Iap2LinkChannel(underlying).also { it.worker.start() }
+            Iap2LinkChannel(underlying, WIRED_LINK_CONFIG, initiateNegotiation = true)
+                .also { it.worker.start() }
+
+        /**
+         * Opens a wireless RFCOMM link. LIVI sends the iAP2 marker but lets the phone initiate
+         * synchronization, and keeps acknowledgements enabled for Bluetooth.
+         */
+        fun openWireless(underlying: BlockingDuplexByteStream): Iap2LinkChannel =
+            Iap2LinkChannel(underlying, WIRELESS_LINK_CONFIG, initiateNegotiation = false)
+                .also { it.worker.start() }
 
         private fun nowMillis(): Long = System.nanoTime() / NANOS_PER_MILLISECOND
     }

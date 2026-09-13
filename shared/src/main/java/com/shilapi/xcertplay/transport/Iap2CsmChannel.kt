@@ -216,5 +216,9 @@ class Iap2CsmChannel private constructor(
         /** Opens the owned iAP2 link over an owned carkit stream. */
         fun open(underlying: BlockingDuplexByteStream): Iap2CsmChannel =
             Iap2CsmChannel(Iap2LinkChannel.open(underlying))
+
+        /** Opens the owned iAP2 link over an owned wireless RFCOMM stream. */
+        fun openWireless(underlying: BlockingDuplexByteStream): Iap2CsmChannel =
+            Iap2CsmChannel(Iap2LinkChannel.openWireless(underlying))
     }
 }

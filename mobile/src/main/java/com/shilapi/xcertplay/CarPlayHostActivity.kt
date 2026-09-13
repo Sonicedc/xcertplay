@@ -7,6 +7,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -44,6 +45,7 @@ import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.orchestration.CarPlayStatus
+import com.shilapi.xcertplay.orchestration.CarPlayTransport
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.UsbDeviceId
 import java.text.SimpleDateFormat
@@ -56,7 +58,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Full-screen CarPlay host. It renders decoded video through a [TextureView], forwards touch to
- * the active AirPlay session, and drives the complete wired bring-up through [CarPlayController].
+ * the active AirPlay session, and drives the complete wired or wireless bring-up through
+ * [CarPlayController].
  *
  * Apple devices are discovered by vendor ID; CH341 uses the configured VID/PID below.
  */
@@ -71,11 +74,13 @@ class CarPlayHostActivity : ComponentActivity() {
         hardwareVersion = "1.0",
         carPlayUsbInterfaceNumber = 3,
     )
+
     // CH341 USB\VID_1A86&PID_5512&REV_0304 is the deployment-supplied bridge identity.
-    private val runtimeConfig: CarPlayRuntimeConfig = CarPlayRuntimeConfig(
+    private fun createRuntimeConfig(): CarPlayRuntimeConfig = CarPlayRuntimeConfig(
         ch341Devices = listOf(UsbDeviceId(0x1a86, 0x5512)),
         ch341MfiResetGpio = 0, // CH341 D0/CS0 -> open-drain MFi RST
         identification = identification,
+        transport = if (wirelessEnabled) CarPlayTransport.WIRELESS else CarPlayTransport.WIRED,
     )
 
     private val vpnConsent =
@@ -88,12 +93,26 @@ class CarPlayHostActivity : ComponentActivity() {
                 setStatus("VPN consent was denied")
             }
         }
+    private val wirelessPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            awaitingWirelessPermissions = false
+            wirelessPermissionsReady = hasRequiredWirelessPermissions()
+            appendLog(
+                if (wirelessPermissionsReady) {
+                    "Wireless startup permissions granted"
+                } else {
+                    "Wireless startup permissions denied"
+                },
+            )
+            updateHotspotStatusBlock()
+            maybeStartCarPlay()
+        }
     private val microphonePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             microphoneAvailable = granted
             microphonePermissionResolved = true
             appendLog(if (granted) "Microphone permission granted" else "Microphone permission denied")
-            requestVpnConsent()
+            requestStartupPrerequisites()
         }
 
     private var videoView: TextureView? = null
@@ -103,6 +122,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var statusScrollView: ScrollView? = null
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
+    private var hotspotStatusView: TextView? = null
     private var sink: AndroidMediaSink? = null
     private var controller: CarPlayController? = null
     private var currentSurface: Surface? = null
@@ -113,8 +133,12 @@ class CarPlayHostActivity : ComponentActivity() {
     private var hevcSoftwareDecoderEnabled = false
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
+    private var wirelessEnabled = false
+    private var wirelessPermissionsReady = false
     private var awaitingVpnConsent = false
+    private var awaitingWirelessPermissions = false
     private var vpnReady = false
+    private var hotspotStatus = HotspotStatus(state = "off")
     private var userLeaving = false
     private var menuOpen = false
     private var handshakeResetInProgress = false
@@ -169,6 +193,8 @@ class CarPlayHostActivity : ComponentActivity() {
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
         hevcSoftwareDecoderEnabled = AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
+        wirelessEnabled = AirPlayPersistence.loadWirelessEnabled(this)
+        wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
         setContentView(buildContentView())
         hideSystemBars()
         onBackPressedDispatcher.addCallback(
@@ -186,14 +212,25 @@ class CarPlayHostActivity : ComponentActivity() {
             },
         )
 
-        appendLog("Host started; CH341 1A86:5512 configured")
+        appendLog(
+            "Host started; CH341 1A86:5512 configured; " +
+                "transport=${if (wirelessEnabled) "wireless" else "wired"}",
+        )
         microphoneAvailable =
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         microphonePermissionResolved = microphoneAvailable
         if (microphonePermissionResolved) {
-            requestVpnConsent()
+            requestStartupPrerequisites()
         } else {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun requestStartupPrerequisites() {
+        if (wirelessEnabled) {
+            requestWirelessPermissions()
+        } else {
+            requestVpnConsent()
         }
     }
 
@@ -208,9 +245,46 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
+    private fun requestWirelessPermissions() {
+        val permissions = requiredWirelessPermissions()
+        if (permissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
+            wirelessPermissionsReady = true
+            updateHotspotStatusBlock()
+            maybeStartCarPlay()
+            return
+        }
+        wirelessPermissionsReady = false
+        updateHotspotStatusBlock()
+        awaitingWirelessPermissions = true
+        wirelessPermissions.launch(permissions.toTypedArray())
+    }
+
+    private fun hasRequiredWirelessPermissions(): Boolean =
+        requiredWirelessPermissions().all {
+            checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+        }
+
+    private fun requiredWirelessPermissions(): List<String> = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> listOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.NEARBY_WIFI_DEVICES,
+        )
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> listOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        )
+        else -> listOf(
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        )
+    }
+
     override fun onResume() {
         super.onResume()
         userLeaving = false
+        wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
+        maybeStartCarPlay()
         hideSystemBars()
     }
 
@@ -221,7 +295,12 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (userLeaving && !isChangingConfigurations && !awaitingVpnConsent) {
+        if (
+            userLeaving &&
+            !isChangingConfigurations &&
+            !awaitingVpnConsent &&
+            !awaitingWirelessPermissions
+        ) {
             finishAndRemoveTask()
             shutdown(terminateProcess = true, reason = "activity left foreground")
         }
@@ -335,6 +414,70 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
+        )
+
+        val wirelessRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        wirelessRow.addView(
+            menuText("Wireless CarPlay", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val wirelessSwitch = Switch(this).apply {
+            isChecked = wirelessEnabled
+            contentDescription = "Wireless CarPlay transport"
+            showText = false
+            thumbTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+            )
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
+            )
+            setOnCheckedChangeListener { _, checked ->
+                if (wirelessEnabled == checked) return@setOnCheckedChangeListener
+                wirelessEnabled = checked
+                AirPlayPersistence.saveWirelessEnabled(this@CarPlayHostActivity, wirelessEnabled)
+                hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
+                updateHotspotStatusBlock()
+                appendLog(
+                    "Wireless CarPlay ${if (wirelessEnabled) "enabled" else "disabled"}; " +
+                        "applies when settings close",
+                )
+                requestStartupPrerequisites()
+            }
+        }
+        wirelessRow.addView(
+            wirelessSwitch,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        content.addView(
+            wirelessRow,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(36) },
+        )
+
+        content.addView(
+            menuText("Hotspot status", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(18) },
+        )
+        val hotspotStatusView = menuText("", 16f, MENU_ACCENT)
+        content.addView(
+            hotspotStatusView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) },
         )
 
         val resolutionHeader = LinearLayout(this).apply {
@@ -558,6 +701,8 @@ class CarPlayHostActivity : ComponentActivity() {
 
         resolutionValueView = resolutionValue
         resolutionPreviewView = preview
+        this.hotspotStatusView = hotspotStatusView
+        updateHotspotStatusBlock()
         updateResolutionMenu()
         return overlay
     }
@@ -573,6 +718,48 @@ class CarPlayHostActivity : ComponentActivity() {
         setTextColor(color)
         typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         includeFontPadding = false
+    }
+
+    private fun updateHotspotStatus(status: CarPlayStatus) {
+        if (!wirelessEnabled) return
+        hotspotStatus = when (status) {
+            CarPlayStatus.StartingHotspot -> HotspotStatus(state = "Starting")
+            is CarPlayStatus.HotspotReady -> HotspotStatus(
+                state = "Ready",
+                ssid = status.ssid,
+                band = status.band,
+                channel = status.channel,
+            )
+            CarPlayStatus.WaitingForPairedIphone ->
+                hotspotStatus.copy(state = "Waiting for paired iPhone")
+            CarPlayStatus.ConnectingBluetooth ->
+                hotspotStatus.copy(state = "Connecting Bluetooth")
+            CarPlayStatus.RunningWireless ->
+                hotspotStatus.copy(state = "Running")
+            CarPlayStatus.WirelessActive ->
+                hotspotStatus.copy(state = "Active")
+            CarPlayStatus.AttachingNetwork ->
+                hotspotStatus.copy(state = "Starting AirPlay service")
+            is CarPlayStatus.Failed -> hotspotStatus.copy(state = "Error")
+            else -> return
+        }
+        updateHotspotStatusBlock()
+    }
+
+    private fun updateHotspotStatusBlock() {
+        if (!wirelessEnabled) {
+            hotspotStatusView?.text = "Wireless hotspot: off"
+            return
+        }
+        val status = hotspotStatus
+        hotspotStatusView?.text = buildString {
+            append("Wireless hotspot: ").append(status.state)
+            status.ssid?.let { append("\nSSID: ").append(it) }
+            status.band?.let { append("\nBand: ").append(it) }
+            status.channel?.let {
+                append("\nChannel: ").append(if (it == 0) "Auto" else it.toString())
+            }
+        }
     }
 
     private fun updateResolutionMenu() {
@@ -615,7 +802,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun startCarPlay(size: DisplaySize) {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress || controller != null) return
         val controllerGeneration = restartGeneration
-        val config = runtimeConfig
+        val config = createRuntimeConfig()
         val airPlayConfig = createAirPlayConfig(size)
         appendLog(
             "Starting CarPlay controller at ${size.width}x${size.height} -> " +
@@ -688,6 +875,7 @@ class CarPlayHostActivity : ComponentActivity() {
             media = media,
             reportStatus = { status ->
                 if (!menuOpen && controllerGeneration == restartGeneration) {
+                    updateHotspotStatus(status)
                     val description = status.describe()
                     setStatus(description)
                     when (status) {
@@ -735,8 +923,9 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun maybeStartCarPlay() {
         val size = activeDisplaySize ?: return
+        val transportReady = if (wirelessEnabled) wirelessPermissionsReady else vpnReady
         if (
-            !vpnReady ||
+            !transportReady ||
             !microphonePermissionResolved ||
             shuttingDown.get() ||
             menuOpen ||
@@ -779,6 +968,8 @@ class CarPlayHostActivity : ComponentActivity() {
         menuOpen = true
         handshakeResetInProgress = true
         startAfterHandshakeReset = false
+        hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
+        updateHotspotStatusBlock()
         val generation = ++restartGeneration
         controller?.sendTouch(emptyList())
         val oldController = controller
@@ -981,15 +1172,23 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayStatus.WaitingForMfi -> "Waiting for MFi coprocessor"
         CarPlayStatus.RequestingMfiPermission -> "Requesting MFi USB permission"
         CarPlayStatus.MfiReady -> "MFi coprocessor ready"
+        CarPlayStatus.StartingHotspot -> "Starting wireless hotspot"
+        is CarPlayStatus.HotspotReady ->
+            "Hotspot ready: $ssid, $band, channel ${if (channel == 0) "auto" else channel}"
+        CarPlayStatus.WaitingForPairedIphone -> "Waiting for paired iPhone"
+        CarPlayStatus.ConnectingBluetooth -> "Connecting Bluetooth"
+        CarPlayStatus.RunningWireless -> "Wireless CarPlay control running"
+        CarPlayStatus.WirelessActive -> "Wireless CarPlay active"
         CarPlayStatus.DiscoveringIphone -> "Discovering iPhone"
-        CarPlayStatus.WaitingForIphone -> "Waiting for iPhone"
+        CarPlayStatus.WaitingForIphone -> "Waiting for iPhone over USB"
         CarPlayStatus.RequestingIphonePermission -> "Requesting iPhone USB permission"
         CarPlayStatus.WaitingForReenumeration -> "Waiting for iPhone re-enumeration"
         CarPlayStatus.SelectingConfiguration -> "Selecting CarPlay configuration"
         CarPlayStatus.OpeningDataPaths -> "Opening USB data paths"
         CarPlayStatus.Pairing -> "Pairing with iPhone"
         CarPlayStatus.ConnectingControl -> "Connecting iAP2 control"
-        CarPlayStatus.AttachingNetwork -> "Attaching NCM/AirPlay network"
+        CarPlayStatus.AttachingNetwork ->
+            if (wirelessEnabled) "Starting AirPlay service" else "Attaching NCM/AirPlay network"
         CarPlayStatus.RunningControl -> "CarPlay control running"
         CarPlayStatus.ControlEnded -> "CarPlay control window ended"
         is CarPlayStatus.Failed -> "Failed: ${message}"
@@ -1016,4 +1215,10 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private data class DisplaySize(val width: Int, val height: Int)
     private data class LogEntry(val timestampMillis: Long, val text: String)
+    private data class HotspotStatus(
+        val state: String,
+        val ssid: String? = null,
+        val band: String? = null,
+        val channel: Int? = null,
+    )
 }
