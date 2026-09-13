@@ -13,8 +13,13 @@ import com.shilapi.xcertplay.transport.I2cTransportException
 class MfiDeviceScanner(
     private val transport: I2cTransport,
     candidateAddresses: List<Int> = DEFAULT_CANDIDATE_ADDRESSES,
+    private val probeTimeoutMillis: Long = DEFAULT_PROBE_TIMEOUT_MILLIS,
 ) {
     private val candidateAddresses = candidateAddresses.toList()
+
+    init {
+        require(probeTimeoutMillis > 0) { "probeTimeoutMillis must be positive" }
+    }
 
     fun scan(): MfiDiscoveryResult {
         val failures = LinkedHashMap<Int, MfiDiscoveryError>()
@@ -28,7 +33,7 @@ class MfiDeviceScanner(
         }
         if (validCandidates.isEmpty()) return MfiDiscoveryResult(null, failures.toFailures())
 
-        val deadlineNanos = deadlineAfter(PROBE_TIMEOUT_MILLIS)
+        val deadlineNanos = deadlineAfter(probeTimeoutMillis)
         while (true) {
             for (address7Bit in validCandidates) {
                 when (val result = readDeviceVersion(address7Bit)) {
@@ -106,7 +111,7 @@ class MfiDeviceScanner(
         private const val DEVICE_VERSION_REGISTER = 0x00
         private const val READ_BIT = 0x01
         private const val BYTE_MASK = 0xff
-        private const val PROBE_TIMEOUT_MILLIS = 2_000L
+        private const val DEFAULT_PROBE_TIMEOUT_MILLIS = 2_000L
         // A first NACK can merely wake a sleeping authentication coprocessor.
         private const val RETRY_DELAY_MICROS = 20_000L
         private const val MICROS_PER_MILLISECOND = 1_000L

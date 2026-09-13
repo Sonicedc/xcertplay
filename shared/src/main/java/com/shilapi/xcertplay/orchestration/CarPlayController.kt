@@ -1,8 +1,11 @@
 package com.shilapi.xcertplay.orchestration
 
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
 import android.content.ComponentName
 import android.content.Context
@@ -10,6 +13,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -409,10 +413,15 @@ class CarPlayController(
     private fun requestCh341Permission(device: UsbDevice) {
         try {
             when (val request = ch341Host!!.requestPermission(device)) {
-                is Ch341UsbHost.PermissionRequest.AlreadyGranted ->
+                is Ch341UsbHost.PermissionRequest.AlreadyGranted -> {
+                    permissionGrant.set(false)
                     onCh341Permission(Ch341UsbHost.PermissionResult.Granted(request.device))
-                is Ch341UsbHost.PermissionRequest.Requested ->
+                }
+                is Ch341UsbHost.PermissionRequest.Requested -> {
+                    permissionGrant.set(false)
                     onStatus(CarPlayStatus.RequestingMfiPermission)
+                    pollCh341Permission(device)
+                }
             }
         } catch (error: Throwable) {
             fail(error)
@@ -422,10 +431,44 @@ class CarPlayController(
     private fun onCh341Permission(result: Ch341UsbHost.PermissionResult) {
         if (closed || phase != Phase.MFI) return
         when (result) {
-            is Ch341UsbHost.PermissionResult.Granted -> openCh341(result.device)
-            is Ch341UsbHost.PermissionResult.Denied ->
+            is Ch341UsbHost.PermissionResult.Granted -> {
+                // The system broadcast and CarUsbHandler's direct grant can both observe success.
+                if (!permissionGrant.compareAndSet(false, true)) return
+                permissionPollGeneration++
+                openCh341(result.device)
+            }
+            is Ch341UsbHost.PermissionResult.Denied -> {
+                permissionGrant.set(true)
                 onStatus(CarPlayStatus.Failed("CH341 USB permission was denied"))
+            }
         }
+    }
+
+    /** Some car systems grant USB access through CarUsbHandler without delivering a broadcast. */
+    private fun pollCh341Permission(device: UsbDevice) {
+        val generation = ++permissionPollGeneration
+        val deadlineNanos = System.nanoTime() + PERMISSION_POLL_TIMEOUT_MILLIS * 1_000_000L
+        val check = object : Runnable {
+            override fun run() {
+                if (closed || phase != Phase.MFI || generation != permissionPollGeneration) return
+                if (usbManager.hasPermission(device)) {
+                    onCh341Permission(Ch341UsbHost.PermissionResult.Granted(device))
+                    return
+                }
+                if (System.nanoTime() >= deadlineNanos) {
+                    if (permissionGrant.compareAndSet(false, true)) {
+                        onStatus(
+                            CarPlayStatus.Failed(
+                                "MFi USB permission was not granted; reconnect the CH341 to retry",
+                            ),
+                        )
+                    }
+                    return
+                }
+                mainHandler.postDelayed(this, PERMISSION_POLL_INTERVAL_MILLIS)
+            }
+        }
+        mainHandler.postDelayed(check, PERMISSION_POLL_INTERVAL_MILLIS)
     }
 
     private fun openCh341(device: UsbDevice) {
@@ -458,7 +501,8 @@ class CarPlayController(
                         mfiSession = MfiSession(client, session)
                         onStatus(CarPlayStatus.MfiReady)
                         startPhone()
-                    } catch (_: MfiCoprocessorNotFoundException) {
+                    } catch (error: MfiCoprocessorNotFoundException) {
+                        Log.w(IphoneCarPlayConfiguration.TAG, error.message ?: "MFi discovery failed")
                         session.close()
                         waitForMfi()
                     } catch (error: Throwable) {
@@ -1031,7 +1075,14 @@ class CarPlayController(
             type.equals("disable-bluetooth", ignoreCase = true)
 
     private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
-        val manager: WirelessHotspotManager = when (config.wirelessHotspotMode) {
+        val hotspotMode = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            config.wirelessHotspotMode == WirelessHotspotMode.WIFI_P2P
+        ) {
+            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT
+        } else {
+            config.wirelessHotspotMode
+        }
+        val manager: WirelessHotspotManager = when (hotspotMode) {
             WirelessHotspotMode.WIFI_P2P -> WifiP2pGroupManager(appContext)
             WirelessHotspotMode.LOCAL_ONLY_HOTSPOT -> LocalOnlyHotspotManager(appContext)
             WirelessHotspotMode.MANUAL -> ManualHotspotManager(
@@ -1042,7 +1093,7 @@ class CarPlayController(
             )
         }
         hotspot = manager
-        val timeoutMillis = if (config.wirelessHotspotMode == WirelessHotspotMode.WIFI_P2P) {
+        val timeoutMillis = if (hotspotMode == WirelessHotspotMode.WIFI_P2P) {
             WIFI_P2P_START_TIMEOUT_MILLIS
         } else {
             HOTSPOT_START_TIMEOUT_MILLIS
@@ -1051,10 +1102,10 @@ class CarPlayController(
             manager.start(timeoutMillis)
         } catch (failure: Exception) {
             if (hotspot === manager) hotspot = null
-            closeBestEffort(config.wirelessHotspotMode.name) { manager.close() }
+            closeBestEffort(hotspotMode.name) { manager.close() }
             if (isStaleWirelessRun(generation)) throw failure
             throw IOException(
-                "Could not establish ${config.wirelessHotspotMode.name} hotspot: " +
+                "Could not establish ${hotspotMode.name} hotspot: " +
                     (failure.message ?: failure.javaClass.simpleName),
                 failure,
             )
@@ -1065,22 +1116,90 @@ class CarPlayController(
         closed || phase != Phase.WIRELESS || generation != wirelessGeneration.get()
 
     private fun selectWirelessBluetoothDevice(adapter: BluetoothAdapter): BluetoothDevice {
-        config.wirelessBluetoothAddress?.let { return adapter.getRemoteDevice(it) }
-
         val bonded = adapter.bondedDevices.orEmpty()
         val iPhones = bonded.filter { device ->
             device.name?.contains("iPhone", ignoreCase = true) == true
         }
+        val directlyConnectedIPhones = iPhones.filter(::isBluetoothDeviceConnected)
+        Log.i(
+            IphoneCarPlayConfiguration.TAG,
+            "wireless Bluetooth bondedIPhones=${iPhones.size} " +
+                "directlyConnected=${directlyConnectedIPhones.size}",
+        )
+        val connectedIPhones = if (directlyConnectedIPhones.isNotEmpty()) {
+            directlyConnectedIPhones
+        } else {
+            val connectedAddresses = connectedBluetoothDevices(adapter).mapTo(mutableSetOf()) {
+                it.address
+            }
+            iPhones.filter { it.address in connectedAddresses }
+        }
+        if (connectedIPhones.size == 1) return connectedIPhones.single()
+        if (connectedIPhones.size > 1) {
+            throw IOException(
+                "Multiple connected iPhones found: " +
+                    connectedIPhones.joinToString { "${it.name ?: "iPhone"} (${it.address})" },
+            )
+        }
         if (iPhones.size == 1) return iPhones.single()
         if (iPhones.size > 1) {
             throw IOException(
-                "Multiple bonded iPhones found; set wirelessBluetoothAddress explicitly",
+                "Multiple bonded iPhones found and none is currently connected; " +
+                    "connect one iPhone and retry",
             )
         }
         if (bonded.size == 1) return bonded.single()
         throw IOException(
-            "No unambiguous bonded iPhone found; pair one or set wirelessBluetoothAddress",
+            "No unambiguous bonded iPhone found; pair one iPhone and retry",
         )
+    }
+
+    private fun isBluetoothDeviceConnected(device: BluetoothDevice): Boolean = try {
+        val method = BluetoothDevice::class.java.getMethod("isConnected")
+        method.invoke(device) as? Boolean == true
+    } catch (error: ReflectiveOperationException) {
+        false
+    } catch (error: RuntimeException) {
+        Log.w(IphoneCarPlayConfiguration.TAG, "Could not read Bluetooth connection state", error)
+        false
+    }
+
+    private fun connectedBluetoothDevices(adapter: BluetoothAdapter): Set<BluetoothDevice> =
+        buildSet {
+            addAll(connectedBluetoothDevices(adapter, BluetoothProfile.HEADSET, BluetoothHeadset::class.java))
+            addAll(connectedBluetoothDevices(adapter, BluetoothProfile.A2DP, BluetoothA2dp::class.java))
+        }
+
+    private fun <T : BluetoothProfile> connectedBluetoothDevices(
+        adapter: BluetoothAdapter,
+        profile: Int,
+        profileClass: Class<T>,
+    ): Set<BluetoothDevice> {
+        val latch = CountDownLatch(1)
+        val devices = java.util.Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
+        val listener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profileId: Int, proxy: BluetoothProfile) {
+                try {
+                    if (profileClass.isInstance(proxy)) {
+                        devices.addAll(proxy.connectedDevices.orEmpty())
+                    }
+                } catch (error: SecurityException) {
+                    Log.w(IphoneCarPlayConfiguration.TAG, "Could not read connected Bluetooth devices", error)
+                } finally {
+                    adapter.closeProfileProxy(profileId, proxy)
+                    latch.countDown()
+                }
+            }
+
+            override fun onServiceDisconnected(profileId: Int) {
+                latch.countDown()
+            }
+        }
+        if (!adapter.getProfileProxy(appContext, listener, profile)) return emptySet()
+        if (!latch.await(3, TimeUnit.SECONDS)) {
+            Log.w(IphoneCarPlayConfiguration.TAG, "Timed out reading Bluetooth profile $profile")
+        }
+        return synchronized(devices) { devices.toSet() }
     }
 
     @Suppress("DEPRECATION")

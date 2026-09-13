@@ -10,7 +10,7 @@ android {
     }
 
     defaultConfig {
-        minSdk = 29
+        minSdk = 28
     }
 
     compileOptions {

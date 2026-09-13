@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
+import androidx.annotation.RequiresApi
 import com.shilapi.xcertplay.transport.Iap2WirelessSecurity
 import java.io.IOException
 import java.net.Inet4Address
@@ -42,6 +43,9 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
     private var startAttempt: StartAttempt? = null
 
     override fun start(timeoutMillis: Long): WirelessHotspotInfo {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw IOException("Wi-Fi P2P credentials require Android 10 (API 29) or newer")
+        }
         check(Looper.myLooper() != Looper.getMainLooper()) {
             "WifiP2pGroupManager.start must not run on the main thread"
         }
@@ -198,6 +202,7 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun awaitUsableGroup(
         attempt: StartAttempt,
         channel: WifiP2pManager.Channel,

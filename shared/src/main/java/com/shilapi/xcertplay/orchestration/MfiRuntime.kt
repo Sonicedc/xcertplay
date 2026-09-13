@@ -7,9 +7,9 @@ import java.io.Closeable
 import java.io.IOException
 
 /** Signals the normal, retryable state where the MFi address probe found no chip. */
-internal class MfiCoprocessorNotFoundException : IOException(
-    "No MFi authentication coprocessor responded to the device probe",
-)
+internal class MfiCoprocessorNotFoundException(
+    message: String = "No MFi authentication coprocessor responded to the device probe",
+) : IOException(message)
 
 /** An opened MFi coprocessor client plus the handle that releases its backing transport. */
 class MfiSession(
@@ -24,8 +24,17 @@ class MfiSession(
 /** Runs the documented address probe and wraps the first responding MFi coprocessor. */
 object MfiRuntime {
     fun scan(transport: I2cTransport): MfiAuthenticationClient {
-        val chip = MfiDeviceScanner(transport).scan().chip
-            ?: throw MfiCoprocessorNotFoundException()
+        val discovery = MfiDeviceScanner(
+            transport = transport,
+            probeTimeoutMillis = MFI_STARTUP_PROBE_TIMEOUT_MILLIS,
+        ).scan()
+        val chip = discovery.chip
+            ?: throw MfiCoprocessorNotFoundException(
+                "No MFi authentication coprocessor responded: " +
+                    discovery.failures.joinToString { "0x${it.address7Bit.toString(16)}=${it.error}" },
+            )
         return MfiAuthenticationClient(transport, chip.address7Bit)
     }
+
+    private const val MFI_STARTUP_PROBE_TIMEOUT_MILLIS = 15_000L
 }

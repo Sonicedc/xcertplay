@@ -182,21 +182,28 @@ class ManualHotspotManager(
     }
 
     private fun NetworkInterface.hotspotAddress(): InetAddress? {
-        var ipv4: InetAddress? = null
+        var ipv6: Inet6Address? = null
         for (address in Collections.list(inetAddresses)) {
+            if (address is Inet4Address && !address.isLoopbackAddress &&
+                !address.isLinkLocalAddress
+            ) {
+                return address
+            }
             if (address is Inet6Address && address.isLinkLocalAddress) {
-                if (address.scopeId == index) return address
-                try {
-                    return Inet6Address.getByAddress(null, address.address, this)
-                } catch (_: UnknownHostException) {
-                    continue
+                if (ipv6 == null) {
+                    ipv6 = if (address.scopeId == index) {
+                        address
+                    } else {
+                        try {
+                            Inet6Address.getByAddress(null, address.address, this)
+                        } catch (_: UnknownHostException) {
+                            null
+                        }
+                    }
                 }
             }
-            if (address is Inet4Address && !address.isLoopbackAddress && ipv4 == null) {
-                ipv4 = address
-            }
         }
-        return ipv4
+        return ipv6
     }
 
     private fun frequencyFromConnectionInfo(): Int? {

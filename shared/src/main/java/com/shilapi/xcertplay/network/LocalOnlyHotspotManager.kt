@@ -300,6 +300,7 @@ class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
         return channel to softApBandLabel(band)
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun readLegacySoftApChannel(configuration: SoftApConfiguration): Pair<Int, String> {
         val channel = try {
             val getter = SoftApConfiguration::class.java.getMethod("getChannel")
@@ -344,6 +345,7 @@ class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
         return band?.let(::softApBandLabel) ?: legacyBandLabel(channel)
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun readLegacySoftApBandLabel(
         configuration: SoftApConfiguration,
         channel: Int,

@@ -36,6 +36,8 @@ The wired connection has been tested; it works.
 - JDK 17 or newer to launch Gradle. The daemon resolves Java 25 through the
   Gradle toolchain.
 - Android SDK Platform 37.
+- Android 9 (API 28) or newer.
+  On Android 9, Wi-Fi P2P 5 GHz mode is unavailable and LocalOnlyHotspot is used instead.
 - Android NDK `28.2.13676358`.
 - Gradle Wrapper `9.5.0`, Android Gradle Plugin `9.3.0`, and Kotlin `2.2.10`
   are already configured in the repository.

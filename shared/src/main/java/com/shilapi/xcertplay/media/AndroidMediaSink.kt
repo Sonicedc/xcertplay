@@ -6,6 +6,7 @@ import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Build
 import android.util.Log
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.AudioCodecKind
@@ -234,7 +235,10 @@ private class VideoDecoder(
     }
 
     private fun createDecoder(mime: String): MediaCodec {
-        if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC && preferSoftwareHevcDecoder) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            mime == MediaFormat.MIMETYPE_VIDEO_HEVC &&
+            preferSoftwareHevcDecoder
+        ) {
             val software = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
                 !it.isEncoder && it.isSoftwareOnly && mime in it.supportedTypes
             }

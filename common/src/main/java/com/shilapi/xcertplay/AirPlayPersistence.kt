@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.content.Context
+import android.os.Build
 import com.shilapi.xcertplay.airplay.AirPlayDisplaySettings
 import com.shilapi.xcertplay.airplay.CarPlayDisplayScale
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
@@ -110,8 +111,15 @@ object AirPlayPersistence {
     fun loadWirelessHotspotMode(context: Context): WirelessHotspotMode {
         val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_WIRELESS_HOTSPOT_MODE, null)
-        return WirelessHotspotMode.entries.firstOrNull { it.name == stored }
+        val mode = WirelessHotspotMode.entries.firstOrNull { it.name == stored }
             ?: WirelessHotspotMode.WIFI_P2P
+        return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            mode == WirelessHotspotMode.WIFI_P2P
+        ) {
+            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT
+        } else {
+            mode
+        }
     }
 
     fun saveWirelessHotspotMode(context: Context, mode: WirelessHotspotMode) {

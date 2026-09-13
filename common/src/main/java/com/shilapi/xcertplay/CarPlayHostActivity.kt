@@ -362,7 +362,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun loadPersistedSettings() {
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
-        hevcSoftwareDecoderEnabled = AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
+        hevcSoftwareDecoderEnabled =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
         advancedAudioChannelMapping =
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
@@ -1016,13 +1018,15 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
-        content.addView(
-            softwareHevcRow,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(16) },
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            content.addView(
+                softwareHevcRow,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(16) },
+            )
+        }
 
         content.addView(
             buildSafeAreaSection(),
@@ -1061,6 +1065,30 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            content.addView(
+                settingsCategoryHeader("Android 9 compatibility"),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(40) },
+            )
+            content.addView(
+                menuText(
+                    "The following settings are unavailable and hidden on Android 9 " +
+                        "(API 28):\n" +
+                        "• Wi-Fi P2P (5 GHz) — LocalOnlyHotspot is used instead.\n" +
+                        "• HEVC software decoder — hardware decoding is used instead.",
+                    16f,
+                    MENU_SECONDARY,
+                ),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(12) },
+            )
+        }
 
         val preview = menuText("", 17f, MENU_SECONDARY)
         content.addView(
@@ -1823,11 +1851,13 @@ class CarPlayHostActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(8), 0, 0)
         }
-        val modes = listOf(
-            WirelessHotspotMode.WIFI_P2P to "Wi-Fi P2P (5 GHz)",
-            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT to "LocalOnlyHotspot",
-            WirelessHotspotMode.MANUAL to "Manual hotspot",
-        )
+        val modes = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(WirelessHotspotMode.WIFI_P2P to "Wi-Fi P2P (5 GHz)")
+            }
+            add(WirelessHotspotMode.LOCAL_ONLY_HOTSPOT to "LocalOnlyHotspot")
+            add(WirelessHotspotMode.MANUAL to "Manual hotspot")
+        }
         var selectedId = View.NO_ID
         for ((mode, label) in modes) {
             val button = RadioButton(this).apply {

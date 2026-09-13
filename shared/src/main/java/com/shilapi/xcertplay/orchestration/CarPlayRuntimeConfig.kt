@@ -32,7 +32,6 @@ class CarPlayRuntimeConfig(
     val label: String = "xcertplay",
     val hostName: String = "xcertplay",
     val transport: CarPlayTransport = CarPlayTransport.WIRED,
-    val wirelessBluetoothAddress: String? = null,
     val wirelessHotspotMode: WirelessHotspotMode = WirelessHotspotMode.WIFI_P2P,
     val manualHotspotSsid: String? = null,
     val manualHotspotPassphrase: String? = null,
@@ -55,9 +54,6 @@ class CarPlayRuntimeConfig(
         require(ch341MfiResetGpio == null || ch341MfiResetGpio in 0..5) {
             "CH341 MFi reset GPIO must be D0..D5"
         }
-        require(wirelessBluetoothAddress == null || BLUETOOTH_ADDRESS.matches(wirelessBluetoothAddress)) {
-            "wirelessBluetoothAddress must be six colon-separated hexadecimal bytes"
-        }
         if (wirelessHotspotMode == WirelessHotspotMode.MANUAL) {
             val ssid = manualHotspotSsid
             require(!ssid.isNullOrBlank()) {
@@ -79,8 +75,6 @@ class CarPlayRuntimeConfig(
     companion object {
         const val APPLE_VENDOR_ID = 0x05ac
         val DEFAULT_HOST_MAC = byteArrayOf(0x02, 0x00, 0x00, 0x00, 0x00, 0x02)
-        private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
-
         private fun isLinkLocalIpv6(value: String): Boolean {
             if (value.contains('%') || '\u0000' in value || !value.contains(':')) return false
             return try {

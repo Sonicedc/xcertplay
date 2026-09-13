@@ -33,6 +33,8 @@
 
 - 启动 Gradle 需要 JDK 17 或更高版本；daemon 通过 Gradle toolchain 解析 Java 25。
 - Android SDK Platform 37。
+- Android 9（API 28）或更高版本。
+  在 Android 9 上不可用 Wi-Fi P2P 5 GHz 模式，应用会改用 LocalOnlyHotspot。
 - Android NDK `28.2.13676358`。
 - 仓库已配置 Gradle Wrapper `9.5.0`、Android Gradle Plugin `9.3.0` 和
   Kotlin `2.2.10`。
