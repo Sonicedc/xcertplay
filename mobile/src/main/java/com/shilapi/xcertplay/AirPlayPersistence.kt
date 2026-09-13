@@ -4,6 +4,7 @@ import android.content.Context
 import com.shilapi.xcertplay.airplay.CarPlayDisplayScale
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.PairingStore
+import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.transport.LockdownPairRecord
 
 /** SharedPreferences persistence for the accessory identity and paired controllers. */
@@ -26,6 +27,9 @@ object AirPlayPersistence {
     private const val KEY_HEVC_ENABLED = "hevc_enabled"
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
     private const val KEY_WIRELESS_ENABLED = "wireless_enabled"
+    private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
+    private const val KEY_MANUAL_HOTSPOT_SSID = "manual_hotspot_ssid"
+    private const val KEY_MANUAL_HOTSPOT_PASSPHRASE = "manual_hotspot_passphrase"
 
     fun loadDisplayScaleTenths(context: Context): Int {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -67,6 +71,41 @@ object AirPlayPersistence {
     fun saveWirelessEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_WIRELESS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadWirelessHotspotMode(context: Context): WirelessHotspotMode {
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_WIRELESS_HOTSPOT_MODE, null)
+        return WirelessHotspotMode.entries.firstOrNull { it.name == stored }
+            ?: WirelessHotspotMode.WIFI_P2P
+    }
+
+    fun saveWirelessHotspotMode(context: Context, mode: WirelessHotspotMode) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_WIRELESS_HOTSPOT_MODE, mode.name)
+            .apply()
+    }
+
+    fun loadManualHotspotSsid(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MANUAL_HOTSPOT_SSID, null)
+            .orEmpty()
+
+    fun saveManualHotspotSsid(context: Context, ssid: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MANUAL_HOTSPOT_SSID, ssid)
+            .apply()
+    }
+
+    fun loadManualHotspotPassphrase(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MANUAL_HOTSPOT_PASSPHRASE, null)
+            .orEmpty()
+
+    fun saveManualHotspotPassphrase(context: Context, passphrase: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MANUAL_HOTSPOT_PASSPHRASE, passphrase)
             .apply()
     }
 

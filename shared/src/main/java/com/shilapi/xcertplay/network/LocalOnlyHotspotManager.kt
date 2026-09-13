@@ -12,7 +12,6 @@ import android.os.HandlerThread
 import android.os.Looper
 import androidx.annotation.RequiresApi
 import com.shilapi.xcertplay.transport.Iap2WirelessSecurity
-import java.io.Closeable
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -23,23 +22,6 @@ import java.net.UnknownHostException
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 
-/** The actual live LocalOnlyHotspot values reported by Android for one reservation. */
-class LocalOnlyHotspotInfo(
-    val ssid: String,
-    val passphrase: String,
-    val security: Iap2WirelessSecurity,
-    val channel: Int,
-    val bssid: String?,
-    val interfaceName: String?,
-    val hostAddress: InetAddress?,
-    val bandLabel: String,
-) {
-    override fun toString(): String =
-        "LocalOnlyHotspotInfo(ssid='$ssid', passphrase=<redacted>, security=$security, " +
-            "channel=$channel, bssid='$bssid', interfaceName=$interfaceName, " +
-            "hostAddress=$hostAddress, bandLabel='$bandLabel')"
-}
-
 /**
  * Owns one Android LocalOnlyHotspot reservation and reports its live configuration.
  *
@@ -47,7 +29,7 @@ class LocalOnlyHotspotInfo(
  * the AP interface is usable. The reservation and multicast lock stay owned by this instance
  * until [close].
  */
-class LocalOnlyHotspotManager(context: Context) : Closeable {
+class LocalOnlyHotspotManager(context: Context) : WirelessHotspotManager {
     private val connectivityManager =
         context.applicationContext.getSystemService(ConnectivityManager::class.java)
     private val wifiManager = context.applicationContext.getSystemService(WifiManager::class.java)
@@ -65,7 +47,7 @@ class LocalOnlyHotspotManager(context: Context) : Closeable {
      * Starts a LocalOnlyHotspot and waits up to [timeoutMillis] for the live configuration and AP
      * interface. The returned credentials are not retained by this manager.
      */
-    fun start(timeoutMillis: Long): LocalOnlyHotspotInfo {
+    override fun start(timeoutMillis: Long): WirelessHotspotInfo {
         check(Looper.myLooper() != Looper.getMainLooper()) {
             "LocalOnlyHotspotManager.start must not run on the main thread"
         }
@@ -113,15 +95,17 @@ class LocalOnlyHotspotManager(context: Context) : Closeable {
                 acquiredMulticastLock = null
             }
 
-            return LocalOnlyHotspotInfo(
+            return WirelessHotspotInfo(
                 ssid = configuration.ssid,
                 passphrase = configuration.passphrase,
                 security = configuration.security,
                 channel = configuration.channel,
+                frequencyMHz = null,
                 bssid = apInterface?.bssid ?: configuration.bssid,
                 interfaceName = apInterface?.name,
                 hostAddress = apInterface?.hostAddress,
                 bandLabel = configuration.bandLabel,
+                backend = WirelessHotspotBackend.LOCAL_ONLY_HOTSPOT,
             )
         } catch (failure: Exception) {
             cleanupFailedStart(attempt, acquiredMulticastLock)

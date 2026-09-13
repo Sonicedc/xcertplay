@@ -27,6 +27,10 @@ import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
+import com.shilapi.xcertplay.network.ManualHotspotManager
+import com.shilapi.xcertplay.network.WifiP2pGroupManager
+import com.shilapi.xcertplay.network.WirelessHotspotInfo
+import com.shilapi.xcertplay.network.WirelessHotspotManager
 import com.shilapi.xcertplay.transport.BluetoothRfcommDuplexStream
 import com.shilapi.xcertplay.transport.Ch341DeviceMatcher
 import com.shilapi.xcertplay.transport.Ch341I2cTransport
@@ -78,6 +82,7 @@ sealed class CarPlayStatus {
         val channel: Int,
         val bssid: String,
         val address: String,
+        val backend: String,
     ) : CarPlayStatus()
     data object WaitingForPairedIphone : CarPlayStatus()
     data object ConnectingBluetooth : CarPlayStatus()
@@ -152,7 +157,7 @@ class CarPlayController(
     @Volatile private var mux: Iap2UsbMuxHost? = null
     @Volatile private var csm: Iap2CsmChannel? = null
     @Volatile private var activeSession: AirPlaySession? = null
-    @Volatile private var hotspot: LocalOnlyHotspotManager? = null
+    @Volatile private var hotspot: WirelessHotspotManager? = null
     @Volatile private var bonjour: CarPlayBonjour? = null
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
@@ -483,32 +488,32 @@ class CarPlayController(
 
             val mfi = mfiSession?.client
                 ?: throw IOException("MFi coprocessor client is unavailable")
-            val manager = LocalOnlyHotspotManager(appContext)
-            hotspot = manager
-            val hotspotInfo = manager.start(HOTSPOT_START_TIMEOUT_MILLIS)
+            val hotspotInfo = startWirelessHotspot(generation)
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
                 return
             }
             val hostAddress = hotspotInfo.hostAddress
                 ?: throw IOException(
-                    "LocalOnlyHotspot did not provide a usable host address",
+                    "Wireless hotspot did not provide a usable host address",
                 )
             if (
                 hostAddress is Inet6Address &&
                 (!hostAddress.isLinkLocalAddress || hostAddress.scopeId == 0)
             ) {
                 throw IOException(
-                    "LocalOnlyHotspot link-local IPv6 address is not scoped",
+                    "Wireless hotspot link-local IPv6 address is not scoped",
                 )
             }
             val hostAddressText = hostAddressText(hostAddress)
             val deviceIdentifier = hotspotInfo.bssid ?: airPlayConfig.deviceId
             Log.i(
                 IphoneCarPlayConfiguration.TAG,
-                "wireless hotspot iface=${hotspotInfo.interfaceName ?: "unknown"} " +
+                "wireless hotspot backend=${hotspotInfo.backend.label} " +
+                    "iface=${hotspotInfo.interfaceName ?: "unknown"} " +
                     "host=$hostAddressText bssid=${hotspotInfo.bssid ?: "unavailable"} " +
-                    "channel=${hotspotInfo.channel}",
+                    "band=${hotspotInfo.bandLabel} channel=${hotspotInfo.channel} " +
+                    "frequency=${hotspotInfo.frequencyMHz?.toString() ?: "unknown"}MHz",
             )
             onStatus(
                 CarPlayStatus.HotspotReady(
@@ -517,6 +522,7 @@ class CarPlayController(
                     channel = hotspotInfo.channel,
                     bssid = deviceIdentifier,
                     address = hostAddressText,
+                    backend = hotspotInfo.backend.label,
                 ),
             )
             onStatus(CarPlayStatus.WaitingForPairedIphone)
@@ -909,6 +915,37 @@ class CarPlayController(
         type.equals("disableBluetooth", ignoreCase = true) ||
             type.equals("disable-bluetooth", ignoreCase = true)
 
+    private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
+        val manager: WirelessHotspotManager = when (config.wirelessHotspotMode) {
+            WirelessHotspotMode.WIFI_P2P -> WifiP2pGroupManager(appContext)
+            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT -> LocalOnlyHotspotManager(appContext)
+            WirelessHotspotMode.MANUAL -> ManualHotspotManager(
+                context = appContext,
+                ssid = config.manualHotspotSsid
+                    ?: throw IOException("Manual hotspot SSID is not configured"),
+                passphrase = config.manualHotspotPassphrase.orEmpty(),
+            )
+        }
+        hotspot = manager
+        val timeoutMillis = if (config.wirelessHotspotMode == WirelessHotspotMode.WIFI_P2P) {
+            WIFI_P2P_START_TIMEOUT_MILLIS
+        } else {
+            HOTSPOT_START_TIMEOUT_MILLIS
+        }
+        return try {
+            manager.start(timeoutMillis)
+        } catch (failure: Exception) {
+            if (hotspot === manager) hotspot = null
+            closeBestEffort(config.wirelessHotspotMode.name) { manager.close() }
+            if (isStaleWirelessRun(generation)) throw failure
+            throw IOException(
+                "Could not establish ${config.wirelessHotspotMode.name} hotspot: " +
+                    (failure.message ?: failure.javaClass.simpleName),
+                failure,
+            )
+        }
+    }
+
     private fun isStaleWirelessRun(generation: Int): Boolean =
         closed || phase != Phase.WIRELESS || generation != wirelessGeneration.get()
 
@@ -973,7 +1010,7 @@ class CarPlayController(
 
         val activeHotspot = hotspot
         hotspot = null
-        if (activeHotspot != null) closeBestEffort("LocalOnlyHotspot") { activeHotspot.close() }
+        if (activeHotspot != null) closeBestEffort("wireless hotspot") { activeHotspot.close() }
 
         if (service != null) closeBestEffort("AirPlay service") { service.detach() }
     }
@@ -1108,6 +1145,7 @@ class CarPlayController(
     companion object {
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
+        private const val WIFI_P2P_START_TIMEOUT_MILLIS = 20_000L
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L

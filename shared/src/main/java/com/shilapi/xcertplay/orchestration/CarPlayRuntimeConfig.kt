@@ -10,6 +10,12 @@ enum class CarPlayTransport {
     WIRELESS,
 }
 
+enum class WirelessHotspotMode {
+    WIFI_P2P,
+    LOCAL_ONLY_HOTSPOT,
+    MANUAL,
+}
+
 /**
  * Deployment-owned constants for one head unit. There are deliberately no built-in Apple or
  * CH341 product IDs: the physical devices attached to the target must be identified first.
@@ -27,6 +33,9 @@ class CarPlayRuntimeConfig(
     val hostName: String = "xcertplay",
     val transport: CarPlayTransport = CarPlayTransport.WIRED,
     val wirelessBluetoothAddress: String? = null,
+    val wirelessHotspotMode: WirelessHotspotMode = WirelessHotspotMode.WIFI_P2P,
+    val manualHotspotSsid: String? = null,
+    val manualHotspotPassphrase: String? = null,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {
@@ -47,6 +56,22 @@ class CarPlayRuntimeConfig(
         }
         require(wirelessBluetoothAddress == null || BLUETOOTH_ADDRESS.matches(wirelessBluetoothAddress)) {
             "wirelessBluetoothAddress must be six colon-separated hexadecimal bytes"
+        }
+        if (wirelessHotspotMode == WirelessHotspotMode.MANUAL) {
+            val ssid = manualHotspotSsid
+            require(!ssid.isNullOrBlank()) {
+                "manualHotspotSsid is required in manual hotspot mode"
+            }
+            require('\u0000' !in ssid) {
+                "manualHotspotSsid must not contain U+0000"
+            }
+            val passphrase = manualHotspotPassphrase.orEmpty()
+            require('\u0000' !in passphrase) {
+                "manualHotspotPassphrase must not contain U+0000"
+            }
+            require(passphrase.isEmpty() || passphrase.length in 8..63) {
+                "manualHotspotPassphrase must be empty or between 8 and 63 characters"
+            }
         }
     }
 

@@ -12,6 +12,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -20,8 +23,11 @@ import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
@@ -46,6 +52,7 @@ import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.orchestration.CarPlayStatus
 import com.shilapi.xcertplay.orchestration.CarPlayTransport
+import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.UsbDeviceId
 import java.text.SimpleDateFormat
@@ -81,6 +88,9 @@ class CarPlayHostActivity : ComponentActivity() {
         ch341MfiResetGpio = 0, // CH341 D0/CS0 -> open-drain MFi RST
         identification = identification,
         transport = if (wirelessEnabled) CarPlayTransport.WIRELESS else CarPlayTransport.WIRED,
+        wirelessHotspotMode = wirelessHotspotMode,
+        manualHotspotSsid = manualHotspotSsid,
+        manualHotspotPassphrase = manualHotspotPassphrase,
     )
 
     private val vpnConsent =
@@ -123,6 +133,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var hotspotStatusView: TextView? = null
+    private var manualHotspotFields: View? = null
+    private var manualHotspotErrorView: TextView? = null
     private var sink: AndroidMediaSink? = null
     private var controller: CarPlayController? = null
     private var currentSurface: Surface? = null
@@ -135,6 +147,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private var microphonePermissionResolved = false
     private var wirelessEnabled = false
     private var wirelessPermissionsReady = false
+    private var wirelessHotspotMode = WirelessHotspotMode.WIFI_P2P
+    private var manualHotspotSsid = ""
+    private var manualHotspotPassphrase = ""
     private var awaitingVpnConsent = false
     private var awaitingWirelessPermissions = false
     private var vpnReady = false
@@ -194,6 +209,9 @@ class CarPlayHostActivity : ComponentActivity() {
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
         hevcSoftwareDecoderEnabled = AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
         wirelessEnabled = AirPlayPersistence.loadWirelessEnabled(this)
+        wirelessHotspotMode = AirPlayPersistence.loadWirelessHotspotMode(this)
+        manualHotspotSsid = AirPlayPersistence.loadManualHotspotSsid(this)
+        manualHotspotPassphrase = AirPlayPersistence.loadManualHotspotPassphrase(this)
         wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
         setContentView(buildContentView())
         hideSystemBars()
@@ -465,6 +483,14 @@ class CarPlayHostActivity : ComponentActivity() {
         )
 
         content.addView(
+            buildHotspotModeSection(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(30) },
+        )
+
+        content.addView(
             menuText("Hotspot status", 20f, MENU_SECONDARY),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -707,6 +733,225 @@ class CarPlayHostActivity : ComponentActivity() {
         return overlay
     }
 
+    private fun buildHotspotModeSection(): View {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        section.addView(
+            menuText("Wi-Fi session", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        val group = RadioGroup(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        val modes = listOf(
+            WirelessHotspotMode.WIFI_P2P to "Wi-Fi P2P (5 GHz)",
+            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT to "LocalOnlyHotspot",
+            WirelessHotspotMode.MANUAL to "Manual hotspot",
+        )
+        var selectedId = View.NO_ID
+        for ((mode, label) in modes) {
+            val button = RadioButton(this).apply {
+                id = View.generateViewId()
+                text = label
+                textSize = 18f
+                setTextColor(MENU_SECONDARY)
+                buttonTintList = ColorStateList(
+                    arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                    intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+                )
+                tag = mode
+                isChecked = wirelessHotspotMode == mode
+            }
+            if (wirelessHotspotMode == mode) selectedId = button.id
+            group.addView(
+                button,
+                RadioGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        if (selectedId != View.NO_ID) group.check(selectedId)
+        group.setOnCheckedChangeListener { radioGroup, checkedId ->
+            val selected = radioGroup.findViewById<RadioButton>(checkedId)
+                ?.tag as? WirelessHotspotMode
+                ?: return@setOnCheckedChangeListener
+            if (wirelessHotspotMode == selected) return@setOnCheckedChangeListener
+            wirelessHotspotMode = selected
+            AirPlayPersistence.saveWirelessHotspotMode(
+                this@CarPlayHostActivity,
+                wirelessHotspotMode,
+            )
+            hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
+            updateHotspotStatusBlock()
+            updateManualHotspotFields()
+            appendLog(
+                "Wi-Fi session mode: ${hotspotModeLabel(wirelessHotspotMode)}; " +
+                    "applies when settings close",
+            )
+        }
+        section.addView(
+            group,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        val manualFields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val ssidInput = manualInput("Hotspot SSID", password = false).apply {
+            setText(manualHotspotSsid)
+            addTextChangedListener(
+                object : TextWatcher {
+                    override fun beforeTextChanged(
+                        text: CharSequence?,
+                        start: Int,
+                        count: Int,
+                        after: Int,
+                    ) = Unit
+
+                    override fun onTextChanged(
+                        text: CharSequence?,
+                        start: Int,
+                        before: Int,
+                        count: Int,
+                    ) = Unit
+
+                    override fun afterTextChanged(text: Editable?) {
+                        manualHotspotSsid = text?.toString().orEmpty()
+                        AirPlayPersistence.saveManualHotspotSsid(
+                            this@CarPlayHostActivity,
+                            manualHotspotSsid,
+                        )
+                        manualHotspotErrorView?.visibility = View.GONE
+                    }
+                },
+            )
+        }
+        manualFields.addView(
+            ssidInput,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        val passphraseInput = manualInput("Hotspot password", password = true).apply {
+            setText(manualHotspotPassphrase)
+            addTextChangedListener(
+                object : TextWatcher {
+                    override fun beforeTextChanged(
+                        text: CharSequence?,
+                        start: Int,
+                        count: Int,
+                        after: Int,
+                    ) = Unit
+
+                    override fun onTextChanged(
+                        text: CharSequence?,
+                        start: Int,
+                        before: Int,
+                        count: Int,
+                    ) = Unit
+
+                    override fun afterTextChanged(text: Editable?) {
+                        manualHotspotPassphrase = text?.toString().orEmpty()
+                        AirPlayPersistence.saveManualHotspotPassphrase(
+                            this@CarPlayHostActivity,
+                            manualHotspotPassphrase,
+                        )
+                        manualHotspotErrorView?.visibility = View.GONE
+                    }
+                },
+            )
+        }
+        manualFields.addView(
+            passphraseInput,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) },
+        )
+
+        val error = menuText("", 14f, Color.rgb(0xff, 0x7a, 0x7a)).apply {
+            visibility = View.GONE
+        }
+        manualFields.addView(
+            error,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) },
+        )
+
+        section.addView(
+            manualFields,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) },
+        )
+        manualHotspotFields = manualFields
+        manualHotspotErrorView = error
+        updateManualHotspotFields()
+        return section
+    }
+
+    private fun manualInput(hintText: String, password: Boolean): EditText =
+        EditText(this).apply {
+            hint = hintText
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setHintTextColor(MENU_SECONDARY)
+            backgroundTintList = ColorStateList.valueOf(MENU_ACCENT)
+            minHeight = dp(48)
+            inputType = if (password) {
+                InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            } else {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            }
+        }
+
+    private fun updateManualHotspotFields() {
+        val visible = wirelessHotspotMode == WirelessHotspotMode.MANUAL
+        manualHotspotFields?.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) manualHotspotErrorView?.visibility = View.GONE
+    }
+
+    private fun validateManualHotspotSettings(): Boolean {
+        if (wirelessHotspotMode != WirelessHotspotMode.MANUAL) return true
+        val error = when {
+            manualHotspotSsid.isBlank() -> "Hotspot SSID is required"
+            manualHotspotSsid.encodeToByteArray().size > 32 ->
+                "Hotspot SSID must be at most 32 UTF-8 bytes"
+            '\u0000' in manualHotspotSsid -> "Hotspot SSID contains U+0000"
+            manualHotspotPassphrase.isNotEmpty() &&
+                manualHotspotPassphrase.length !in 8..63 ->
+                "Hotspot password must be empty or 8-63 characters"
+            '\u0000' in manualHotspotPassphrase -> "Hotspot password contains U+0000"
+            else -> null
+        }
+        manualHotspotErrorView?.text = error.orEmpty()
+        manualHotspotErrorView?.visibility = if (error == null) View.GONE else View.VISIBLE
+        return error == null
+    }
+
+    private fun hotspotModeLabel(mode: WirelessHotspotMode): String = when (mode) {
+        WirelessHotspotMode.WIFI_P2P -> "Wi-Fi P2P (5 GHz)"
+        WirelessHotspotMode.LOCAL_ONLY_HOTSPOT -> "LocalOnlyHotspot"
+        WirelessHotspotMode.MANUAL -> "Manual hotspot"
+    }
+
     private fun menuText(
         text: String,
         sizeSp: Float,
@@ -729,6 +974,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 ssid = status.ssid,
                 band = status.band,
                 channel = status.channel,
+                backend = status.backend,
             )
             CarPlayStatus.WaitingForPairedIphone ->
                 hotspotStatus.copy(state = "Waiting for paired iPhone")
@@ -755,6 +1001,7 @@ class CarPlayHostActivity : ComponentActivity() {
         hotspotStatusView?.text = buildString {
             append("Wireless hotspot: ").append(status.state)
             status.ssid?.let { append("\nSSID: ").append(it) }
+            status.backend?.let { append("\nBackend: ").append(it) }
             status.band?.let { append("\nBand: ").append(it) }
             status.channel?.let {
                 append("\nChannel: ").append(if (it == 0) "Auto" else it.toString())
@@ -1007,6 +1254,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun closeSettingsMenu() {
         if (!menuOpen) return
+        if (!validateManualHotspotSettings()) return
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
@@ -1015,7 +1263,8 @@ class CarPlayHostActivity : ComponentActivity() {
         appendLog(
             "Settings closed; starting a fresh handshake at " +
                 "${CarPlayDisplayScale.label(displayScaleTenths)} with " +
-                (if (hevcEnabled) "HEVC (H.265)" else "H.264"),
+                (if (hevcEnabled) "HEVC (H.265)" else "H.264") +
+                ", Wi-Fi session ${hotspotModeLabel(wirelessHotspotMode)}",
         )
         if (handshakeResetInProgress) {
             startAfterHandshakeReset = true
@@ -1174,7 +1423,8 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayStatus.MfiReady -> "MFi coprocessor ready"
         CarPlayStatus.StartingHotspot -> "Starting wireless hotspot"
         is CarPlayStatus.HotspotReady ->
-            "Hotspot ready: $ssid, $band, channel ${if (channel == 0) "auto" else channel}"
+            "Hotspot ready: $backend, $ssid, $band, " +
+                "channel ${if (channel == 0) "auto" else channel}"
         CarPlayStatus.WaitingForPairedIphone -> "Waiting for paired iPhone"
         CarPlayStatus.ConnectingBluetooth -> "Connecting Bluetooth"
         CarPlayStatus.RunningWireless -> "Wireless CarPlay control running"
@@ -1220,5 +1470,6 @@ class CarPlayHostActivity : ComponentActivity() {
         val ssid: String? = null,
         val band: String? = null,
         val channel: Int? = null,
+        val backend: String? = null,
     )
 }
