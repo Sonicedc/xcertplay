@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- It indicates that it requires a template host -->
-    <uses-feature
-        android:name="android.software.car.templates_host"
-        android:required="true" />
     <uses-feature
         android:name="android.hardware.type.automotive"
         android:required="true" />
@@ -12,32 +8,18 @@
     <application
         android:allowBackup="true"
         android:appCategory="audio"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Xcertplay">
 
-        <!-- It declares support for Android Automotive OS -->
+        <!-- It declares support for Android Automotive OS. -->
         <meta-data
             android:name="com.android.automotive"
             android:resource="@xml/automotive_app_desc" />
-
-        <!-- An entry point for CAL Android Automotive OS app -->
-        <activity
-            android:name="androidx.car.app.activity.CarAppActivity"
-            android:exported="true"
-            android:launchMode="singleTask">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-
-            <meta-data
-                android:name="distractionOptimized"
-                android:value="true" />
-        </activity>
     </application>
 
 </manifest>

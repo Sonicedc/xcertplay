@@ -29,6 +29,7 @@ class AndroidMediaSink(
     private val videoWidth: Int = 1280,
     private val videoHeight: Int = 720,
     private val preferSoftwareHevcDecoder: Boolean = false,
+    private val advancedAudioChannelMapping: Boolean = false,
     private val onScreenStreamActiveChanged: (Int, Boolean) -> Unit = { _, _ -> },
 ) : MediaSink {
     private val defaultSurface = surface
@@ -109,7 +110,7 @@ class AndroidMediaSink(
         val existing = audioRenderers[type]
         if (existing?.format == format) return existing
         existing?.close()
-        return AudioRenderer(format).also { audioRenderers[type] = it }
+        return AudioRenderer(format, advancedAudioChannelMapping).also { audioRenderers[type] = it }
     }
 }
 
@@ -363,7 +364,10 @@ private fun MediaFormat.intOrNull(key: String): Int? =
     }
 
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
-private class AudioRenderer(val format: AudioFormat) : Closeable {
+private class AudioRenderer(
+    val format: AudioFormat,
+    private val advancedAudioChannelMapping: Boolean,
+) : Closeable {
     private data class AudioPacket(val rtp: ByteArray, val sample: Int)
 
     private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
@@ -502,26 +506,18 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
     }
 
     private fun audioAttributes(): AudioAttributes {
-        val usage = when (format.audioType.lowercase()) {
-            "telephony" -> AudioAttributes.USAGE_VOICE_COMMUNICATION
-            "speechrecognition" -> AudioAttributes.USAGE_ASSISTANT
-            "media" -> AudioAttributes.USAGE_MEDIA
-            "default", "alert", "compatibility" ->
-                AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
-            else -> if (format.payloadType == STREAM_TYPE_MAIN_HIGH_AUDIO) {
-                AudioAttributes.USAGE_MEDIA
-            } else {
-                AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
-            }
+        val mode = if (advancedAudioChannelMapping) {
+            AudioChannelMappingMode.AUTOMOTIVE_BUS
+        } else {
+            AudioChannelMappingMode.MOBILE_COMPATIBLE
         }
-        val contentType = when (usage) {
-            AudioAttributes.USAGE_MEDIA -> AudioAttributes.CONTENT_TYPE_MUSIC
-            AudioAttributes.USAGE_VOICE_COMMUNICATION,
-            AudioAttributes.USAGE_ASSISTANT,
-            AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE ->
-                AudioAttributes.CONTENT_TYPE_SPEECH
-            else -> AudioAttributes.CONTENT_TYPE_SONIFICATION
-        }
+        val selection = AudioChannelMapper.map(
+            audioType = format.audioType,
+            payloadType = format.payloadType,
+            mode = mode,
+        )
+        val usage = usageFor(selection.channel)
+        val contentType = contentTypeFor(selection.contentType)
         return AudioAttributes.Builder()
             .setUsage(usage)
             .setContentType(contentType)
@@ -530,9 +526,22 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
                 Log.i(
                     TAG,
                     "audio route type=${format.payloadType} audioType=${format.audioType} " +
+                        "mode=$mode channel=${selection.channel} " +
                         "usage=$usage contentType=$contentType",
                 )
             }
+    }
+
+    private fun usageFor(channel: AudioChannel): Int = when (channel) {
+        AudioChannel.MEDIA -> AudioAttributes.USAGE_MEDIA
+        AudioChannel.PHONE -> AudioAttributes.USAGE_VOICE_COMMUNICATION
+        AudioChannel.ASSISTANT -> AudioAttributes.USAGE_ASSISTANT
+        AudioChannel.NAVIGATION -> AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
+    }
+
+    private fun contentTypeFor(contentType: AudioContentType): Int = when (contentType) {
+        AudioContentType.MUSIC -> AudioAttributes.CONTENT_TYPE_MUSIC
+        AudioContentType.SPEECH -> AudioAttributes.CONTENT_TYPE_SPEECH
     }
 
     /** Minimal OpusHead CSD for the mono 48 kHz stream CarPlay negotiates. */
@@ -784,6 +793,5 @@ private class AudioRenderer(val format: AudioFormat) : Closeable {
         const val MIN_START_BUFFER_BYTES = 4 * 1024
         const val PREBUFFER_WRITE_CHUNK_BYTES = 2 * 1024
         const val DECODED_BUFFER_LOG_INTERVAL = 50
-        const val STREAM_TYPE_MAIN_HIGH_AUDIO = 102
     }
 }

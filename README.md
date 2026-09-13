@@ -26,8 +26,9 @@ The wired connection has been tested; it works.
 
 | Path | Purpose |
 | --- | --- |
-| `mobile/` | Projected Android Auto app with the full-screen CarPlay host UI. |
-| `automotive/` | Android Automotive OS app entry point. |
+| `common/` | Shared CarPlay host activity, settings UI, persistence, and app resources used by both targets. |
+| `mobile/` | Standard Android target using the shared CarPlay host UI. |
+| `automotive/` | Android Automotive OS target with the shared host UI and advanced audio channel mapping. |
 | `shared/` | Car App Library code plus the CH341, I2C, MFi, iPhone, iAP2, NCM, VPN, AirPlay, and media implementations. |
 
 ## Requirements
@@ -47,13 +48,13 @@ On Windows PowerShell:
 
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+.\gradlew.bat :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 On macOS or Linux:
 
 ```bash
-./gradlew :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+./gradlew :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 Unsigned release APKs:

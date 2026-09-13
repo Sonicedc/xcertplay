@@ -24,8 +24,9 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `mobile/` | 包含完整 CarPlay 主机界面的 Android Auto 投射应用。 |
-| `automotive/` | Android Automotive OS 应用入口。 |
+| `common/` | 两个目标共用的 CarPlay 宿主界面、设置、持久化和应用资源。 |
+| `mobile/` | 使用共享 CarPlay 主机界面的 Android 应用。 |
+| `automotive/` | 使用共享主机界面并支持高级音频通道映射的 Android Automotive OS 应用。 |
 | `shared/` | Car App Library 代码，以及 CH341、I2C、MFi、iPhone、iAP2、NCM、VPN、AirPlay 和媒体实现。 |
 
 ## 环境要求
@@ -43,13 +44,13 @@
 
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-.\gradlew.bat :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+.\gradlew.bat :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 在 macOS 或 Linux 中：
 
 ```bash
-./gradlew :shared:testDebugUnitTest :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
+./gradlew :shared:testDebugUnitTest :common:lintDebug :mobile:lintDebug :automotive:lintDebug :mobile:assembleDebug :automotive:assembleDebug
 ```
 
 构建未签名 release APK：

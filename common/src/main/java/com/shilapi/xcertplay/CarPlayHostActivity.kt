@@ -55,6 +55,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.CarPlayMediaEngine
 import com.shilapi.xcertplay.airplay.SafeAreaRect
+import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.network.CarPlayVpnService
@@ -184,6 +185,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var displayScaleTenths = CarPlayDisplayScale.DEFAULT_TENTHS
     private var hevcEnabled = true
     private var hevcSoftwareDecoderEnabled = false
+    private var advancedAudioChannelMappingSupported = false
+    private var advancedAudioChannelMapping = false
     private var debugLogsEnabled = false
     private var autoStartOnBoot = false
     private var manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER
@@ -271,10 +274,15 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        advancedAudioChannelMappingSupported =
+            resources.getBoolean(R.bool.config_advanced_audio_channel_mapping)
         airPlayIdentity = AirPlayPersistence.loadIdentity(this)
         displayScaleTenths = AirPlayPersistence.loadDisplayScaleTenths(this)
         hevcEnabled = AirPlayPersistence.loadHevcEnabled(this)
         hevcSoftwareDecoderEnabled = AirPlayPersistence.loadHevcSoftwareDecoderEnabled(this)
+        advancedAudioChannelMapping =
+            advancedAudioChannelMappingSupported &&
+                AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
         manufacturer = AirPlayPersistence.loadManufacturer(this)
@@ -654,6 +662,38 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) },
         )
+
+        if (advancedAudioChannelMappingSupported) {
+            content.addView(
+                settingsCategoryHeader("Audio"),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(36) },
+            )
+            content.addView(
+                settingsSwitchRow(
+                    label = "Advanced audio channel mapping",
+                    checked = advancedAudioChannelMapping,
+                    description = "Route AAOS audio buses by CarPlay audio type",
+                ) { checked ->
+                    advancedAudioChannelMapping = checked
+                    AirPlayPersistence.saveAdvancedAudioChannelMapping(
+                        this@CarPlayHostActivity,
+                        checked,
+                    )
+                    appendLog(
+                        "Advanced audio channel mapping ${if (checked) "enabled" else "disabled"}; " +
+                            "applies when settings close",
+                    )
+                    updateResolutionMenu()
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(12) },
+            )
+        }
 
         content.addView(
             settingsCategoryHeader("Identity & appearance"),
@@ -1778,6 +1818,11 @@ class CarPlayHostActivity : ComponentActivity() {
             append("Driving side: ").append(if (rightHandDrive) "right" else "left").append('\n')
             append("Fullscreen: ").append(fullscreen).append('\n')
             append("Video transport: ").append(transport).append('\n')
+            if (advancedAudioChannelMappingSupported) {
+                append("Audio channel mapping: ")
+                    .append(if (advancedAudioChannelMapping) "AAOS buses" else "Mobile compatible")
+                    .append('\n')
+            }
             append(safeAreaSummary())
         }
     }
@@ -1982,6 +2027,7 @@ class CarPlayHostActivity : ComponentActivity() {
             videoWidth = airPlayConfig.main.widthPixels,
             videoHeight = airPlayConfig.main.heightPixels,
             preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
+            advancedAudioChannelMapping = advancedAudioChannelMapping,
             onScreenStreamActiveChanged = { type, active ->
                 onScreenStreamStateChanged(controllerGeneration, type, active)
             },

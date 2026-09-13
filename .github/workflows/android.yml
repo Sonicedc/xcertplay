@@ -38,6 +38,7 @@ jobs:
         run: >-
           ./gradlew
           :shared:testDebugUnitTest
+          :common:lintDebug
           :mobile:lintDebug
           :automotive:lintDebug
           :mobile:assembleDebug
