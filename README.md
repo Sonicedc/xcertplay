@@ -22,6 +22,8 @@ bus to access the MFi authentication coprocessor.
 
 It works on my own car, both wireless and wired. Now drawing PCB...
 
+PCB: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
+
 ## Project structure
 
 | Path | Purpose |

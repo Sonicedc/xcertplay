@@ -20,6 +20,8 @@
 
 他运转👍 正在绘制mfi芯片转接板
 
+转接板：[CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
+
 ## 工程结构
 
 | 路径 | 用途 |
