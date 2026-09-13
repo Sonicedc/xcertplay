@@ -24,6 +24,12 @@ class Iap2CsmChannel private constructor(
     private var closed = false
     private var terminalFailure: Throwable? = null
 
+    /** True once this channel is closed or has recorded a terminal transport failure. */
+    val isClosed: Boolean
+        get() = synchronized(stateLock) {
+            closed || terminalFailure != null
+        }
+
     /** Waits for the underlying link to negotiate a writable session 10. */
     fun awaitReady(timeoutMillis: Long): Boolean {
         requireTimeout(timeoutMillis)

@@ -108,6 +108,8 @@ data class Iap2IdentificationConfig(
     val externalAccessoryProtocol: String = "com.shilapi.xcertplay",
     /** Non-null selects the wireless Bluetooth and WirelessCarPlay transport components. */
     val wireless: Iap2WirelessIdentification? = null,
+    /** Advertises and enables iAP2 LocationInformation from the accessory to the phone. */
+    val locationInformationEnabled: Boolean = false,
 ) {
     constructor(
         name: String,
@@ -232,6 +234,16 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                     Iap2CsmParameter(4, EMPTY),
                 ),
             )
+            val sentMessages = if (config.locationInformationEnabled) {
+                MESSAGES_SENT_BY_ACCESSORY + LOCATION_INFORMATION
+            } else {
+                MESSAGES_SENT_BY_ACCESSORY
+            }
+            val receivedMessages = if (config.locationInformationEnabled) {
+                MESSAGES_RECEIVED_FROM_PHONE + START_LOCATION_INFORMATION + STOP_LOCATION_INFORMATION
+            } else {
+                MESSAGES_RECEIVED_FROM_PHONE
+            }
             val parameters = mutableListOf(
                 Iap2CsmParameter(0, nulTerminated(config.name)),
                 Iap2CsmParameter(1, nulTerminated(config.modelIdentifier)),
@@ -241,11 +253,24 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                 Iap2CsmParameter(5, nulTerminated(config.hardwareVersion)),
                 Iap2CsmParameter(
                     6,
-                    u16List(if (wireless == null) MESSAGES_SENT_BY_ACCESSORY else MESSAGES_SENT_BY_WIRELESS_ACCESSORY),
+                    u16List(
+                        if (wireless == null) {
+                            sentMessages
+                        } else {
+                            sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray() +
+                                ACCESSORY_WIFI_CONFIGURATION_INFORMATION
+                        },
+                    ),
                 ),
                 Iap2CsmParameter(
                     7,
-                    u16List(if (wireless == null) MESSAGES_RECEIVED_FROM_PHONE else MESSAGES_RECEIVED_FROM_WIRELESS_PHONE),
+                    u16List(
+                        if (wireless == null) {
+                            receivedMessages
+                        } else {
+                            receivedMessages + WIRELESS_PHONE_MESSAGES
+                        },
+                    ),
                 ),
                 Iap2CsmParameter(8, byteArrayOf(if (wireless == null) 2 else 0)),
                 Iap2CsmParameter(9, u16(20)),
@@ -258,6 +283,9 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
             } else {
                 parameters += Iap2CsmParameter(17, bluetoothTransport(wireless))
                 parameters += Iap2CsmParameter(24, wirelessCarPlayTransport(wireless))
+            }
+            if (config.locationInformationEnabled) {
+                parameters += Iap2CsmParameter(22, locationInformationComponent(config.name))
             }
             val payload = Iap2CsmParameters.encode(parameters)
             check(payload.size + Iap2CsmFramer.HEADER_BYTES <= Iap2CsmFramer.MAX_FRAME_BYTES) {
@@ -287,6 +315,16 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                     Iap2CsmParameter(3, u16(1)),
                     Iap2CsmParameter(4, EMPTY),
                     Iap2CsmParameter(5, EMPTY),
+                ),
+            )
+
+        private fun locationInformationComponent(name: String): ByteArray =
+            Iap2CsmParameters.encode(
+                listOf(
+                    Iap2CsmParameter(0, u16(0)),
+                    Iap2CsmParameter(1, nulTerminated(name)),
+                    Iap2CsmParameter(17, EMPTY),
+                    Iap2CsmParameter(18, EMPTY),
                 ),
             )
 
@@ -334,9 +372,11 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
             0x4155, // CallStateUpdate
             0x4300, // CarPlayAvailability
         )
-        private val MESSAGES_SENT_BY_WIRELESS_ACCESSORY =
-            MESSAGES_SENT_BY_ACCESSORY.filterNot { it == 0xae03 }.toIntArray() + 0x5703
-        private val MESSAGES_RECEIVED_FROM_WIRELESS_PHONE = MESSAGES_RECEIVED_FROM_PHONE +
-            intArrayOf(0x4e0d, 0x4e0e, 0x5702)
+        private const val POWER_SOURCE_UPDATE = 0xae03
+        private const val ACCESSORY_WIFI_CONFIGURATION_INFORMATION = 0x5703
+        private const val LOCATION_INFORMATION = 0xfffb
+        private const val START_LOCATION_INFORMATION = 0xfffa
+        private const val STOP_LOCATION_INFORMATION = 0xfffc
+        private val WIRELESS_PHONE_MESSAGES = intArrayOf(0x4e0d, 0x4e0e, 0x5702)
     }
 }

@@ -3,6 +3,7 @@ package com.shilapi.xcertplay.transport
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import java.net.Inet6Address
 import java.net.InetAddress
+import kotlin.math.min
 
 /**
  * The wired LIVI control sequence after a CSM channel is ready:
@@ -21,6 +22,7 @@ class Iap2WiredControlClient(
         endpoint: Iap2WiredCarPlayEndpoint,
         availableCurrentMilliAmps: Int,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+        locationProvider: Iap2LocationProvider? = null,
         onIncoming: (CsmFrame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WiredControlResult {
@@ -46,37 +48,104 @@ class Iap2WiredControlClient(
 
         var forwardedFrames = 0
         var carPlayStartSessions = 0
-        while (true) {
-            val remaining = remainingMillis(deadlineNanos)
-            if (remaining == 0L) {
-                return Iap2WiredControlResult(Iap2WiredControlTerminal.TIMED_OUT, stage, forwardedFrames, carPlayStartSessions)
+        var locationActive = false
+        try {
+            while (true) {
+                val remaining = remainingMillis(deadlineNanos)
+                if (remaining == 0L) {
+                    return Iap2WiredControlResult(Iap2WiredControlTerminal.TIMED_OUT, stage, forwardedFrames, carPlayStartSessions)
+                }
+                if (locationActive) sendLatestLocation(locationProvider, deadlineNanos)
+                val pollTimeout = if (locationActive) {
+                    min(remaining, LOCATION_POLL_INTERVAL_MILLIS)
+                } else {
+                    remaining
+                }
+                val incoming = channel.recv(pollTimeout)
+                if (incoming == null) {
+                    if (channel.isClosed) {
+                        return Iap2WiredControlResult(
+                            Iap2WiredControlTerminal.CHANNEL_CLOSED,
+                            stage,
+                            forwardedFrames,
+                            carPlayStartSessions,
+                        )
+                    }
+                    if (remainingMillis(deadlineNanos) == 0L) {
+                        return Iap2WiredControlResult(
+                            Iap2WiredControlTerminal.TIMED_OUT,
+                            stage,
+                            forwardedFrames,
+                            carPlayStartSessions,
+                        )
+                    }
+                    continue
+                }
+
+                when (incoming.messageId) {
+                    CARPLAY_AVAILABILITY -> {
+                        onProgress("iap2 rx=0x4300 carplay-availability")
+                        onProgress(carPlayAvailabilitySummary(incoming.payload))
+                        // LIVI sends its wired answer on every availability notification; do not gate it on
+                        // the phone's advertised availability boolean.
+                        send(carPlayStartSession(endpoint), deadlineNanos)
+                        stage = Iap2WiredControlStage.CARPLAY_START_SENT
+                        carPlayStartSessions++
+                        onProgress("iap2 tx=0x4301 carplay-start-session")
+                    }
+
+                    Iap2LocationMessages.START_LOCATION_INFORMATION -> {
+                        onProgress("iap2 rx=0xfffa start-location-information")
+                        locationActive = startLocationUpdates(locationProvider, onProgress)
+                        if (locationActive) sendLatestLocation(locationProvider, deadlineNanos)
+                    }
+
+                    Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
+                        onProgress("iap2 rx=0xfffc stop-location-information")
+                        locationActive = false
+                        locationProvider?.stop()
+                    }
+
+                    else -> {
+                        onProgress("iap2 rx=0x${incoming.messageId.toString(16).padStart(4, '0')}")
+                        onIncoming(incoming)
+                        forwardedFrames++
+                    }
+                }
             }
-            val incoming = channel.recv(remaining)
-                ?: return Iap2WiredControlResult(
-                    if (remainingMillis(deadlineNanos) == 0L) Iap2WiredControlTerminal.TIMED_OUT else Iap2WiredControlTerminal.CHANNEL_CLOSED,
-                    stage,
-                    forwardedFrames,
-                    carPlayStartSessions,
-                )
-            if (incoming.messageId == CARPLAY_AVAILABILITY) {
-                onProgress("iap2 rx=0x4300 carplay-availability")
-                onProgress(carPlayAvailabilitySummary(incoming.payload))
-                // LIVI sends its wired answer on every availability notification; do not gate it on
-                // the phone's advertised availability boolean.
-                send(carPlayStartSession(endpoint), deadlineNanos)
-                stage = Iap2WiredControlStage.CARPLAY_START_SENT
-                carPlayStartSessions++
-                onProgress("iap2 tx=0x4301 carplay-start-session")
-            } else {
-                onProgress("iap2 rx=0x${incoming.messageId.toString(16).padStart(4, '0')}")
-                onIncoming(incoming)
-                forwardedFrames++
-            }
+        } finally {
+            locationProvider?.stop()
         }
     }
 
     private fun send(frame: CsmFrame, deadlineNanos: Long) {
         channel.send(frame, requireRemaining(deadlineNanos))
+    }
+
+    private fun sendLatestLocation(
+        provider: Iap2LocationProvider?,
+        deadlineNanos: Long,
+    ) {
+        val sentence = provider?.latestNmea() ?: return
+        channel.send(
+            Iap2LocationMessages.locationInformation(sentence),
+            requireRemaining(deadlineNanos),
+        )
+    }
+
+    private fun startLocationUpdates(
+        provider: Iap2LocationProvider?,
+        onProgress: (String) -> Unit,
+    ): Boolean {
+        if (provider == null) return false
+        return try {
+            provider.start().also { started ->
+                if (!started) onProgress("iap2 location provider did not start")
+            }
+        } catch (error: Exception) {
+            onProgress("iap2 location provider start failed: ${error.message}")
+            false
+        }
     }
 
     companion object {
@@ -88,8 +157,10 @@ class Iap2WiredControlClient(
         private const val START_CALL_STATE_UPDATES = 0x4154
         private const val CARPLAY_AVAILABILITY = 0x4300
         private const val CARPLAY_START_SESSION = 0x4301
+        private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
         private const val DEFAULT_TIMEOUT_MILLIS = 60_000L
-        private const val MAX_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+        private const val MAX_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
+        private const val MAX_RECV_TIMEOUT_MILLIS = 5 * 60 * 1_000L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         /** Exact LIVI wired PowerSourceUpdate encoding: current and the charge-if-powered flag. */
@@ -180,7 +251,8 @@ class Iap2WiredControlClient(
         private fun remainingMillis(deadlineNanos: Long): Long {
             val remaining = deadlineNanos - System.nanoTime()
             if (remaining <= 0) return 0L
-            return ((remaining + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND).coerceAtMost(MAX_TIMEOUT_MILLIS)
+            return ((remaining + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
+                .coerceAtMost(MAX_RECV_TIMEOUT_MILLIS)
         }
 
         private val EMPTY = ByteArray(0)

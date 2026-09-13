@@ -46,6 +46,7 @@ object AirPlayPersistence {
     private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
     private const val KEY_SAFE_AREA_DRAW_OUTSIDE = "safe_area_draw_outside"
     private const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
+    private const val KEY_LOCATION_REPORTING_ENABLED = "location_reporting_enabled"
     private const val SAFE_AREA_KEY_PREFIX = "safe_area_"
     private const val CUSTOM_ICON_FILE = "airplay-icon.png"
 
@@ -158,6 +159,16 @@ object AirPlayPersistence {
     fun saveAutoStartOnBoot(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_AUTO_START_ON_BOOT, enabled)
+            .apply()
+    }
+
+    fun loadLocationReportingEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_LOCATION_REPORTING_ENABLED, false)
+
+    fun saveLocationReportingEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_LOCATION_REPORTING_ENABLED, enabled)
             .apply()
     }
 

@@ -36,6 +36,7 @@ class CarPlayRuntimeConfig(
     val wirelessHotspotMode: WirelessHotspotMode = WirelessHotspotMode.WIFI_P2P,
     val manualHotspotSsid: String? = null,
     val manualHotspotPassphrase: String? = null,
+    val locationReportingEnabled: Boolean = false,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {

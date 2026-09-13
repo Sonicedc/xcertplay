@@ -56,6 +56,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.CarPlayMediaEngine
 import com.shilapi.xcertplay.airplay.SafeAreaRect
 import com.shilapi.xcertplay.host.R
+import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.network.CarPlayVpnService
@@ -65,6 +66,7 @@ import com.shilapi.xcertplay.orchestration.CarPlayStatus
 import com.shilapi.xcertplay.orchestration.CarPlayTransport
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
+import com.shilapi.xcertplay.transport.Iap2LocationProvider
 import com.shilapi.xcertplay.transport.UsbDeviceId
 import java.io.File
 import java.text.SimpleDateFormat
@@ -97,11 +99,13 @@ class CarPlayHostActivity : ComponentActivity() {
             firmwareVersion = "1.0.0",
             hardwareVersion = "1.0",
             carPlayUsbInterfaceNumber = 3,
+            locationInformationEnabled = locationReportingEnabled,
         ),
         transport = if (wirelessEnabled) CarPlayTransport.WIRELESS else CarPlayTransport.WIRED,
         wirelessHotspotMode = wirelessHotspotMode,
         manualHotspotSsid = manualHotspotSsid,
         manualHotspotPassphrase = manualHotspotPassphrase,
+        locationReportingEnabled = locationReportingEnabled,
     )
 
     private val vpnConsent =
@@ -135,6 +139,32 @@ class CarPlayHostActivity : ComponentActivity() {
             appendLog(if (granted) "Microphone permission granted" else "Microphone permission denied")
             requestStartupPrerequisites()
         }
+    private val locationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+            awaitingLocationPermission = false
+            locationPermissionAvailable = hasFineLocationPermission()
+            if (locationPermissionAvailable) {
+                appendLog("Location permission granted")
+            } else if (locationReportingEnabled) {
+                locationReportingEnabled = false
+                AirPlayPersistence.saveLocationReportingEnabled(
+                    this@CarPlayHostActivity,
+                    false,
+                )
+                locationReportingSwitch?.isChecked = false
+                val approximateOnly =
+                    grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+                appendLog(
+                    if (approximateOnly) {
+                        "Precise location permission denied; location reporting disabled"
+                    } else {
+                        "Location permission denied; location reporting disabled"
+                    },
+                )
+            }
+            updateResolutionMenu()
+            if (!menuOpen) requestStartupPrerequisites()
+        }
 
     private val imagePicker =
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -160,6 +190,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var videoView: TextureView? = null
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
+    private var locationReportingSwitch: Switch? = null
     private var statusView: TextView? = null
     private var statusScrollView: ScrollView? = null
     private var stageStatusView: TextView? = null
@@ -198,6 +229,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var hideTopBar = true
     private var hideBottomBar = true
     private var safeAreaDrawOutside = true
+    private var locationReportingEnabled = false
+    private var locationPermissionAvailable = false
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
     private var wirelessEnabled = false
@@ -207,6 +240,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var manualHotspotPassphrase = ""
     private var awaitingVpnConsent = false
     private var awaitingWirelessPermissions = false
+    private var awaitingLocationPermission = false
     private var vpnReady = false
     private var hotspotStatus = HotspotStatus(state = "off")
     private var userLeaving = false
@@ -225,6 +259,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val airPlayCommandExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val logLines = ArrayDeque<LogEntry>()
     private val expireOldLogLines = Runnable { refreshLogView(System.currentTimeMillis()) }
     private val applyDisplaySize = Runnable {
@@ -297,6 +332,8 @@ class CarPlayHostActivity : ComponentActivity() {
         hideTopBar = AirPlayPersistence.loadHideTopBar(this)
         hideBottomBar = AirPlayPersistence.loadHideBottomBar(this)
         safeAreaDrawOutside = AirPlayPersistence.loadSafeAreaDrawOutside(this)
+        locationReportingEnabled = AirPlayPersistence.loadLocationReportingEnabled(this)
+        locationPermissionAvailable = hasFineLocationPermission()
         wirelessEnabled = AirPlayPersistence.loadWirelessEnabled(this)
         wirelessHotspotMode = AirPlayPersistence.loadWirelessHotspotMode(this)
         manualHotspotSsid = AirPlayPersistence.loadManualHotspotSsid(this)
@@ -334,12 +371,31 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun requestStartupPrerequisites() {
+        if (locationReportingEnabled && !locationPermissionAvailable) {
+            requestLocationPermission()
+            return
+        }
         if (wirelessEnabled) {
             requestWirelessPermissions()
         } else {
             requestVpnConsent()
         }
     }
+
+    private fun requestLocationPermission() {
+        if (locationPermissionAvailable || awaitingLocationPermission) return
+        awaitingLocationPermission = true
+        locationPermission.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+            ),
+        )
+    }
+
+    private fun hasFineLocationPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
 
     private fun requestVpnConsent() {
         val consent = CarPlayVpnService.prepare(this)
@@ -390,6 +446,10 @@ class CarPlayHostActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         userLeaving = false
+        locationPermissionAvailable = hasFineLocationPermission()
+        if (locationReportingEnabled && !locationPermissionAvailable && !menuOpen) {
+            requestLocationPermission()
+        }
         wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
         maybeStartCarPlay()
         applyFullscreenMode()
@@ -412,6 +472,7 @@ class CarPlayHostActivity : ComponentActivity() {
             !isChangingConfigurations &&
             !awaitingVpnConsent &&
             !awaitingWirelessPermissions &&
+            !awaitingLocationPermission &&
             !externalActivityInProgress
         ) {
             finishAndRemoveTask()
@@ -646,6 +707,21 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(6) },
+        )
+
+        content.addView(
+            settingsCategoryHeader("Location"),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(36) },
+        )
+        content.addView(
+            buildLocationReportingSection(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
         )
 
         content.addView(
@@ -1092,6 +1168,78 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun settingsCategoryHeader(title: String): TextView =
         menuText(title, 16f, MENU_ACCENT, bold = true)
+
+    private fun buildLocationReportingSection(): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val row = LinearLayout(this@CarPlayHostActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(
+                menuText("Report location to iPhone", 20f, MENU_SECONDARY),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            val switch = Switch(this@CarPlayHostActivity).apply {
+                isChecked = locationReportingEnabled
+                contentDescription = "Report Android location to the iPhone"
+                showText = false
+                thumbTintList = ColorStateList(
+                    arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                    intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+                )
+                trackTintList = ColorStateList(
+                    arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                    intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
+                )
+                setOnCheckedChangeListener { _, checked ->
+                    onLocationReportingChanged(checked)
+                }
+            }
+            locationReportingSwitch = switch
+            row.addView(
+                switch,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                row,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                menuText(
+                    "Sends precise Android location as CarPlay GPS data when the iPhone requests it.",
+                    14f,
+                    MENU_SECONDARY,
+                ),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(6) },
+            )
+        }
+
+    private fun onLocationReportingChanged(checked: Boolean) {
+        if (locationReportingEnabled == checked) return
+        locationReportingEnabled = checked
+        AirPlayPersistence.saveLocationReportingEnabled(
+            this@CarPlayHostActivity,
+            locationReportingEnabled,
+        )
+        appendLog(
+            "Location reporting ${if (locationReportingEnabled) "enabled" else "disabled"}; " +
+                "applies when settings close",
+        )
+        updateResolutionMenu()
+        if (locationReportingEnabled && !locationPermissionAvailable) {
+            requestLocationPermission()
+        }
+    }
 
     private fun buildDebugLogsSection(): View =
         settingsSwitchRow(
@@ -1826,6 +1974,9 @@ class CarPlayHostActivity : ComponentActivity() {
             append("Driving side: ").append(if (rightHandDrive) "right" else "left").append('\n')
             append("Fullscreen: ").append(fullscreen).append('\n')
             append("Video transport: ").append(transport).append('\n')
+            append("Location reporting: ")
+                .append(if (locationReportingEnabled) "enabled" else "disabled")
+                .append('\n')
             if (advancedAudioChannelMappingSupported) {
                 append("Audio channel mapping: ")
                     .append(if (advancedAudioChannelMapping) "AAOS buses" else "Mobile compatible")
@@ -2013,13 +2164,20 @@ class CarPlayHostActivity : ComponentActivity() {
         val controllerGeneration = restartGeneration
         val config = createRuntimeConfig()
         val airPlayConfig = createAirPlayConfig(size)
+        val locationProvider: Iap2LocationProvider? =
+            if (config.locationReportingEnabled) {
+                AndroidCarPlayLocationProvider(this)
+            } else {
+                null
+            }
         appendLog(
             "Starting CarPlay controller at ${size.width}x${size.height} -> " +
                 "${airPlayConfig.main.widthPixels}x${airPlayConfig.main.heightPixels} " +
                 "(${CarPlayDisplayScale.label(displayScaleTenths)}) " +
                 "video=${if (airPlayConfig.hevc) "HEVC" else "H.264"} " +
                 "decoder=${if (airPlayConfig.hevc && hevcSoftwareDecoderEnabled) "software" else "hardware"} " +
-                "microphone=${airPlayConfig.microphone}",
+                "microphone=${airPlayConfig.microphone} " +
+                "location=${if (config.locationReportingEnabled) "enabled" else "disabled"}",
         )
         Log.i(
             TAG,
@@ -2028,7 +2186,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 "scale=${CarPlayDisplayScale.label(displayScaleTenths)} " +
                 "hevc=${airPlayConfig.hevc} " +
                 "softwareHevc=${airPlayConfig.hevc && hevcSoftwareDecoderEnabled} " +
-                "microphone=${airPlayConfig.microphone}",
+                "microphone=${airPlayConfig.microphone} " +
+                "location=${config.locationReportingEnabled}",
         )
         val renderer = AndroidMediaSink(
             surface = null,
@@ -2109,6 +2268,7 @@ class CarPlayHostActivity : ComponentActivity() {
             loadPairRecord = { AirPlayPersistence.loadLockdownRecord(this) },
             savePairRecord = { record -> AirPlayPersistence.saveLockdownRecord(this, record) },
             clearPairRecord = { AirPlayPersistence.clearLockdownRecord(this) },
+            locationProvider = locationProvider,
         )
         controller = next
         next.start()
@@ -2116,11 +2276,18 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun syncAirPlayDarkMode() {
         val session = activeAirPlaySession ?: return
-        val sent = session.setNightMode(darkMode)
-        Log.i(
-            TAG,
-            "AirPlay dark mode=${if (darkMode) "dark" else "light"} eventChannelReady=$sent",
-        )
+        val night = darkMode
+        airPlayCommandExecutor.execute {
+            try {
+                val sent = session.setNightMode(night)
+                Log.i(
+                    TAG,
+                    "AirPlay dark mode=${if (night) "dark" else "light"} eventChannelReady=$sent",
+                )
+            } catch (error: Throwable) {
+                Log.w(TAG, "Could not send AirPlay dark mode update", error)
+            }
+        }
     }
 
     private fun audioCaptureDirectory(): File? {
@@ -2160,8 +2327,10 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun maybeStartCarPlay() {
         val size = activeDisplaySize ?: return
         val transportReady = if (wirelessEnabled) wirelessPermissionsReady else vpnReady
+        val locationReady = !locationReportingEnabled || locationPermissionAvailable
         if (
             !transportReady ||
+            !locationReady ||
             !microphonePermissionResolved ||
             shuttingDown.get() ||
             menuOpen ||
@@ -2279,6 +2448,7 @@ class CarPlayHostActivity : ComponentActivity() {
             oldController?.close()
             val clean = oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS) ?: true
             oldSink?.close()
+            airPlayCommandExecutor.shutdown()
             Log.i(TAG, "shutdown complete clean=$clean")
             teardownExecutor.shutdown()
             if (terminateProcess) Process.killProcess(Process.myPid())

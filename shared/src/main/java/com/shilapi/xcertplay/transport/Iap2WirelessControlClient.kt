@@ -19,6 +19,7 @@ class Iap2WirelessControlClient(
         identification: Iap2IdentificationConfig,
         endpoint: Iap2WirelessCarPlayEndpoint,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+        locationProvider: Iap2LocationProvider? = null,
         onIncoming: (CsmFrame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WirelessControlResult {
@@ -47,53 +48,86 @@ class Iap2WirelessControlClient(
         var forwardedFrames = 0
         var wifiConfigurationsSent = 0
         var carPlayStartSessionsSent = 0
-        while (true) {
-            val remaining = remainingMillis(deadlineNanos)
-            if (remaining == 0L) {
-                return Iap2WirelessControlResult(
-                    Iap2WirelessControlTerminal.TIMED_OUT,
-                    stage,
-                    forwardedFrames,
-                    wifiConfigurationsSent,
-                    carPlayStartSessionsSent,
-                )
-            }
-            val incoming = channel.recv(remaining)
-                ?: return Iap2WirelessControlResult(
+        var locationActive = false
+        try {
+            while (true) {
+                val remaining = remainingMillis(deadlineNanos)
+                if (remaining == 0L) {
+                    return Iap2WirelessControlResult(
+                        Iap2WirelessControlTerminal.TIMED_OUT,
+                        stage,
+                        forwardedFrames,
+                        wifiConfigurationsSent,
+                        carPlayStartSessionsSent,
+                    )
+                }
+                if (locationActive) sendLatestLocation(locationProvider, deadlineNanos)
+                val pollTimeout = if (locationActive) {
+                    min(remaining, LOCATION_POLL_INTERVAL_MILLIS)
+                } else {
+                    remaining
+                }
+                val incoming = channel.recv(pollTimeout)
+                if (incoming == null) {
+                    if (channel.isClosed) {
+                        return Iap2WirelessControlResult(
+                            Iap2WirelessControlTerminal.CHANNEL_CLOSED,
+                            stage,
+                            forwardedFrames,
+                            wifiConfigurationsSent,
+                            carPlayStartSessionsSent,
+                        )
+                    }
                     if (remainingMillis(deadlineNanos) == 0L) {
-                        Iap2WirelessControlTerminal.TIMED_OUT
-                    } else {
-                        Iap2WirelessControlTerminal.CHANNEL_CLOSED
-                    },
-                    stage,
-                    forwardedFrames,
-                    wifiConfigurationsSent,
-                    carPlayStartSessionsSent,
-                )
-
-            when (incoming.messageId) {
-                REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
-                    onProgress("iap2 rx=0x5702 request-wifi-configuration")
-                    send(accessoryWiFiConfiguration(endpoint), deadlineNanos)
-                    stage = later(stage, Iap2WirelessControlStage.WIFI_CONFIG_SENT)
-                    wifiConfigurationsSent++
-                    onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
+                        return Iap2WirelessControlResult(
+                            Iap2WirelessControlTerminal.TIMED_OUT,
+                            stage,
+                            forwardedFrames,
+                            wifiConfigurationsSent,
+                            carPlayStartSessionsSent,
+                        )
+                    }
+                    continue
                 }
 
-                CARPLAY_AVAILABILITY -> {
-                    onProgress("iap2 rx=0x4300 carplay-availability")
-                    send(carPlayStartSession(endpoint), deadlineNanos)
-                    stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
-                    carPlayStartSessionsSent++
-                    onProgress("iap2 tx=0x4301 carplay-start-session")
-                }
+                when (incoming.messageId) {
+                    REQUEST_ACCESSORY_WIFI_CONFIGURATION -> {
+                        onProgress("iap2 rx=0x5702 request-wifi-configuration")
+                        send(accessoryWiFiConfiguration(endpoint), deadlineNanos)
+                        stage = later(stage, Iap2WirelessControlStage.WIFI_CONFIG_SENT)
+                        wifiConfigurationsSent++
+                        onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
+                    }
 
-                else -> {
-                    onProgress("iap2 rx=0x${incoming.messageId.toString(16).padStart(4, '0')}")
-                    onIncoming(incoming)
-                    forwardedFrames++
+                    CARPLAY_AVAILABILITY -> {
+                        onProgress("iap2 rx=0x4300 carplay-availability")
+                        send(carPlayStartSession(endpoint), deadlineNanos)
+                        stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
+                        carPlayStartSessionsSent++
+                        onProgress("iap2 tx=0x4301 carplay-start-session")
+                    }
+
+                    Iap2LocationMessages.START_LOCATION_INFORMATION -> {
+                        onProgress("iap2 rx=0xfffa start-location-information")
+                        locationActive = startLocationUpdates(locationProvider, onProgress)
+                        if (locationActive) sendLatestLocation(locationProvider, deadlineNanos)
+                    }
+
+                    Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
+                        onProgress("iap2 rx=0xfffc stop-location-information")
+                        locationActive = false
+                        locationProvider?.stop()
+                    }
+
+                    else -> {
+                        onProgress("iap2 rx=0x${incoming.messageId.toString(16).padStart(4, '0')}")
+                        onIncoming(incoming)
+                        forwardedFrames++
+                    }
                 }
             }
+        } finally {
+            locationProvider?.stop()
         }
     }
 
@@ -101,13 +135,41 @@ class Iap2WirelessControlClient(
         channel.send(frame, requireRemaining(deadlineNanos))
     }
 
+    private fun sendLatestLocation(
+        provider: Iap2LocationProvider?,
+        deadlineNanos: Long,
+    ) {
+        val sentence = provider?.latestNmea() ?: return
+        channel.send(
+            Iap2LocationMessages.locationInformation(sentence),
+            requireRemaining(deadlineNanos),
+        )
+    }
+
+    private fun startLocationUpdates(
+        provider: Iap2LocationProvider?,
+        onProgress: (String) -> Unit,
+    ): Boolean {
+        if (provider == null) return false
+        return try {
+            provider.start().also { started ->
+                if (!started) onProgress("iap2 location provider did not start")
+            }
+        } catch (error: Exception) {
+            onProgress("iap2 location provider start failed: ${error.message}")
+            false
+        }
+    }
+
     companion object {
         private const val REQUEST_ACCESSORY_WIFI_CONFIGURATION = 0x5702
         private const val ACCESSORY_WIFI_CONFIGURATION = 0x5703
         private const val CARPLAY_AVAILABILITY = 0x4300
         private const val CARPLAY_START_SESSION = 0x4301
+        private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
         private const val DEFAULT_TIMEOUT_MILLIS = 60_000L
-        private const val MAX_TIMEOUT_MILLIS = 5 * 60 * 1_000L
+        private const val MAX_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
+        private const val MAX_RECV_TIMEOUT_MILLIS = 5 * 60 * 1_000L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         /** Exact LIVI 0x5703 flat Wi-Fi credential payload. */
@@ -177,7 +239,10 @@ class Iap2WirelessControlClient(
         private fun remainingMillis(deadlineNanos: Long): Long {
             val remaining = deadlineNanos - System.nanoTime()
             if (remaining <= 0) return 0L
-            return min(MAX_TIMEOUT_MILLIS, (remaining + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
+            return min(
+                MAX_RECV_TIMEOUT_MILLIS,
+                (remaining + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND,
+            )
         }
     }
 }

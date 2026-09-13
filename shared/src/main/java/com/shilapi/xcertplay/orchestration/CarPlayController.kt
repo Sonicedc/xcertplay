@@ -37,6 +37,7 @@ import com.shilapi.xcertplay.transport.Ch341I2cTransport
 import com.shilapi.xcertplay.transport.Ch341UsbHost
 import com.shilapi.xcertplay.transport.Ch341UsbSession
 import com.shilapi.xcertplay.transport.Iap2CsmChannel
+import com.shilapi.xcertplay.transport.Iap2LocationProvider
 import com.shilapi.xcertplay.transport.Iap2UsbMuxHost
 import com.shilapi.xcertplay.transport.Iap2UsbSession
 import com.shilapi.xcertplay.transport.Iap2WiredCarPlayEndpoint
@@ -121,7 +122,14 @@ class CarPlayController(
     private val loadPairRecord: () -> LockdownPairRecord? = { null },
     private val savePairRecord: (LockdownPairRecord) -> Unit = {},
     private val clearPairRecord: () -> Unit = {},
+    private val locationProvider: Iap2LocationProvider? = null,
 ) : Closeable {
+    init {
+        require(!config.locationReportingEnabled || locationProvider != null) {
+            "A location provider is required when location reporting is enabled"
+        }
+    }
+
     private enum class Phase { IDLE, MFI, WIRELESS, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
     private val appContext = context.applicationContext
@@ -288,6 +296,7 @@ class CarPlayController(
                     }
                     closeBestEffort("MFi") { mfiSession?.close() }
                     mfiSession = null
+                    closeBestEffort("location provider") { locationProvider?.close() }
                 } finally {
                     executor.shutdownNow()
                     try {
@@ -615,7 +624,8 @@ class CarPlayController(
             ).run(
                 identification = identification,
                 endpoint = endpoint,
-                timeoutMillis = CONTROL_LOOP_TIMEOUT_MILLIS,
+                timeoutMillis = controlLoopTimeoutMillis(),
+                locationProvider = locationProvider,
                 onProgress = { message ->
                     Log.i(IphoneCarPlayConfiguration.TAG, message)
                 },
@@ -874,7 +884,8 @@ class CarPlayController(
                 identification = config.identification,
                 endpoint = endpoint,
                 availableCurrentMilliAmps = config.availableCurrentMilliAmps,
-                timeoutMillis = CONTROL_LOOP_TIMEOUT_MILLIS,
+                timeoutMillis = controlLoopTimeoutMillis(),
+                locationProvider = locationProvider,
                 onIncoming = { },
                 onProgress = { message -> Log.i(IphoneCarPlayConfiguration.TAG, message) },
             )
@@ -1023,6 +1034,9 @@ class CarPlayController(
         }
     }
 
+    private fun controlLoopTimeoutMillis(): Long =
+        if (config.locationReportingEnabled) LOCATION_CONTROL_LOOP_TIMEOUT_MILLIS else CONTROL_LOOP_TIMEOUT_MILLIS
+
     private fun attachVpn(ncm: NcmUsbBridge, hostMac: ByteArray): Boolean {
         onStatus(CarPlayStatus.AttachingNetwork)
         val service = awaitVpnService() ?: run {
@@ -1149,6 +1163,7 @@ class CarPlayController(
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L
         private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L
+        private const val LOCATION_CONTROL_LOOP_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
         private const val PERMISSION_POLL_INTERVAL_MILLIS = 500L
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
         private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L
