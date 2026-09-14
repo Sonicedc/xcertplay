@@ -2327,6 +2327,15 @@ class CarPlayHostActivity : ComponentActivity() {
                     reconnectAfterLoss("CarPlay transport error: $message")
                 }
             }
+
+            override fun onDebugLog(message: String) {
+                runOnUiThread {
+                    if (menuOpen || controllerGeneration != restartGeneration) {
+                        return@runOnUiThread
+                    }
+                    appendLog(message)
+                }
+            }
         }
 
     private fun createStatusReporter(
@@ -2335,7 +2344,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (!menuOpen && controllerGeneration == restartGeneration) {
             updateHotspotStatus(status)
             val description = status.describe()
-            setStatus(description)
+            setConnectionStage(description)
             when (status) {
                 is CarPlayStatus.Failed -> reconnectAfterLoss(description)
                 else -> Unit

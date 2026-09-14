@@ -257,7 +257,9 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                         if (wireless == null) {
                             sentMessages
                         } else {
-                            sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray() +
+                            sentMessages.filterNot {
+                                it == POWER_SOURCE_UPDATE || it == CARPLAY_START_SESSION
+                            }.toIntArray() +
                                 ACCESSORY_WIFI_CONFIGURATION_INFORMATION
                         },
                     ),
@@ -268,7 +270,8 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                         if (wireless == null) {
                             receivedMessages
                         } else {
-                            receivedMessages + WIRELESS_PHONE_MESSAGES
+                            receivedMessages.filterNot { it == CARPLAY_AVAILABILITY }.toIntArray() +
+                                WIRELESS_PHONE_MESSAGES
                         },
                     ),
                 ),
@@ -373,6 +376,8 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
             0x4300, // CarPlayAvailability
         )
         private const val POWER_SOURCE_UPDATE = 0xae03
+        private const val CARPLAY_AVAILABILITY = 0x4300
+        private const val CARPLAY_START_SESSION = 0x4301
         private const val ACCESSORY_WIFI_CONFIGURATION_INFORMATION = 0x5703
         private const val LOCATION_INFORMATION = 0xfffb
         private const val START_LOCATION_INFORMATION = 0xfffa

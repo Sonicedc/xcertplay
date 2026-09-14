@@ -6,6 +6,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -26,6 +28,7 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
     private var server: ServerSocket? = null
     private var socket: Socket? = null
     private var thread: Thread? = null
+    private val peerConnected = CountDownLatch(1)
     @Volatile private var listener: Listener = object : Listener {}
 
     fun listen(listener: Listener): Int {
@@ -43,12 +46,25 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
         safeClose(socket)
         safeClose(server)
         thread?.interrupt()
+        peerConnected.countDown()
+    }
+
+    /** Waits until the iPhone has connected to the advertised dataPort. */
+    fun awaitPeerConnection(timeoutMillis: Long): Boolean {
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        return try {
+            peerConnected.await(timeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 
     private fun accept(bound: ServerSocket) {
         try {
             val accepted = bound.accept()
             socket = accepted
+            peerConnected.countDown()
             run(accepted)
         } catch (error: Exception) {
             if (!closed.get()) listener.onClosed(error)

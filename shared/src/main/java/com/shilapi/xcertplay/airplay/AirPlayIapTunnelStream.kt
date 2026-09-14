@@ -36,7 +36,13 @@ internal class AirPlayIapTunnelStream(
         synchronized(lock) {
             if (closed || peerEnded) throw IOException("AirPlay iAP tunnel is closed")
         }
-        if (!session.sendIapMessage(data)) {
+        if (!tunnel.awaitPeerConnection(PEER_CONNECT_TIMEOUT_MILLIS)) {
+            throw IOException("CarPlay iAP tunnel peer did not connect")
+        }
+        synchronized(lock) {
+            if (closed || peerEnded) throw IOException("AirPlay iAP tunnel is closed")
+        }
+        if (!session.sendIapMessage(data, EVENT_READY_TIMEOUT_MILLIS)) {
             throw IOException("AirPlay event channel rejected an iAP message")
         }
     }
@@ -113,6 +119,8 @@ internal class AirPlayIapTunnelStream(
 
     private companion object {
         const val MAX_PENDING_BYTES = 1_048_576
+        const val PEER_CONNECT_TIMEOUT_MILLIS = 15_000L
+        const val EVENT_READY_TIMEOUT_MILLIS = 10_000L
         const val NANOS_PER_MILLISECOND = 1_000_000L
         val EMPTY = ByteArray(0)
     }

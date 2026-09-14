@@ -31,6 +31,7 @@ interface AirPlaySessionListener {
     fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {}
     fun onHostUiRequested(session: AirPlaySession) {}
     fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {}
+    fun onDebugLog(message: String) {}
 }
 
 /** Stream transport seam; media decode/render is supplied by a later layer. */
@@ -42,6 +43,7 @@ interface AirPlayMediaHandler {
     fun onTeardown(session: AirPlaySession, type: Int) {}
     fun onSessionClosed(session: AirPlaySession) {}
     fun setIapTunnelHandler(handler: ((BlockingDuplexByteStream) -> Boolean)?) {}
+    fun onSetupResponseSent(session: AirPlaySession) {}
 }
 
 /**
@@ -177,13 +179,40 @@ class AirPlaySession(
         sendCommand(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 3)))
     }
 
-    fun sendIapMessage(data: ByteArray): Boolean =
-        sendCommand(
-            linkedMapOf(
-                "type" to "iAPSendMessage",
-                "params" to linkedMapOf("data" to data),
-            ),
+    fun sendIapMessage(data: ByteArray, timeoutMillis: Long = 0L): Boolean {
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        val command = linkedMapOf<String, Any?>(
+            "type" to "iAPSendMessage",
+            "params" to linkedMapOf("data" to data),
         )
+        if (timeoutMillis == 0L) return sendCommand(command)
+
+        val deadlineNanos = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
+        while (true) {
+            val sent = synchronized(eventWriteLock) {
+                if (eventSocket == null || eventCipher == null) {
+                    null
+                } else {
+                    sendCommandLocked(command)
+                }
+            }
+            if (sent != null) return sent
+            if (closed.get()) return false
+
+            val remainingNanos = deadlineNanos - System.nanoTime()
+            if (remainingNanos <= 0) return false
+            val sleepMillis = minOf(
+                EVENT_READY_POLL_MILLIS,
+                (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND,
+            ).coerceAtLeast(1)
+            try {
+                Thread.sleep(sleepMillis)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+    }
 
     fun setNightMode(night: Boolean): Boolean = synchronized(eventWriteLock) {
         pendingNightMode = night
@@ -240,9 +269,13 @@ class AirPlaySession(
                 accumulated = parsed.rest
                 for (request in parsed.messages) {
                     val cseq = request.headers["cseq"] ?: "-"
-                    Log.i(
-                        TAG,
+                    val path = request.path.lowercase()
+                    val showInDebugOverlay =
+                        !path.endsWith("/feedback") &&
+                            !(request.method == "POST" && path.endsWith("/command"))
+                    debugLog(
                         "airplay rx ${request.method} ${request.path} cseq=$cseq body=${request.body.size}",
+                        showInDebugOverlay,
                     )
                     val response = try {
                         handle(request)
@@ -254,25 +287,26 @@ class AirPlaySession(
                         )
                         RtspMessage.Response(status = 500)
                     }
-                    Log.i(
-                        TAG,
+                    debugLog(
                         "airplay tx status=${response.status ?: 200} cseq=$cseq body=${response.body.size}",
+                        showInDebugOverlay,
                     )
                     val wire = RtspMessage.buildResponse(request, response)
                     output.write(cipher?.encrypt(wire) ?: wire)
                     if (cipher == null && pairVerify.controlKeys != null) {
                         val keys = pairVerify.controlKeys!!
                         cipher = ControlCipher(keys.readKey, keys.writeKey)
-                        Log.i(TAG, "airplay control encryption enabled")
+                        debugLog("airplay control encryption enabled")
                     }
                 }
                 output.flush()
+                notifySetupResponseSent()
             }
         } catch (error: Exception) {
             closeReason = "control I/O failed: ${error.message ?: error.javaClass.simpleName}"
             if (!closed.get()) Log.e(TAG, "airplay $closeReason", error)
         } finally {
-            Log.i(TAG, "airplay control closing reason=$closeReason activeStreams=$activeStreams")
+            debugLog("airplay control closing reason=$closeReason activeStreams=$activeStreams")
             close()
         }
     }
@@ -310,7 +344,7 @@ class AirPlaySession(
                     } catch (_: Exception) {
                         "<unparseable ${request.body.size} bytes>"
                     }
-                    Log.i(TAG, "airplay /info request=$requestInfo")
+                    debugLog("airplay /info request=$requestInfo")
                 }
                 Log.i(
                     TAG,
@@ -339,6 +373,24 @@ class AirPlaySession(
         }
     }
 
+    private fun notifySetupResponseSent() {
+        try {
+            media.onSetupResponseSent(this)
+        } catch (error: Exception) {
+            Log.w(TAG, "airplay SETUP response callback failed", error)
+        }
+    }
+
+    private fun debugLog(message: String, uiVisible: Boolean = true) {
+        Log.i(TAG, message)
+        if (!uiVisible) return
+        try {
+            listener.onDebugLog(message)
+        } catch (error: Exception) {
+            Log.w(TAG, "debug log callback failed", error)
+        }
+    }
+
     private fun handleSetup(request: RtspMessage.Request): RtspMessage.Response {
         val dict = try {
             asMap(BplistCodec.decode(request.body)) ?: return RtspMessage.Response(status = 400)
@@ -346,7 +398,7 @@ class AirPlaySession(
             Log.e(TAG, "airplay SETUP plist decode failed body=${request.body.size}", error)
             return RtspMessage.Response(status = 400)
         }
-        Log.i(TAG, "airplay SETUP keys=${dict.keys.sorted()}")
+        debugLog("airplay SETUP keys=${dict.keys.sorted()}")
         val streams = dict["streams"] as? List<*>
         if (streams != null) {
             val body = BplistCodec.encode(linkedMapOf("streams" to handleStreams(streams)))
@@ -387,11 +439,11 @@ class AirPlaySession(
         for (entry in streams) {
             val stream = asMap(entry) ?: continue
             val type = long(stream["type"])?.toInt() ?: continue
-            Log.i(TAG, "airplay SETUP stream type=$type keys=${stream.keys.sorted()}")
+            debugLog("airplay SETUP stream type=$type keys=${stream.keys.sorted()}")
             when (type) {
                 STREAM_TYPE_MAIN_SCREEN, STREAM_TYPE_ALT_SCREEN -> {
                     val port = media.onScreen(this, type, stream)
-                    Log.i(TAG, "airplay screen stream type=$type dataPort=${port ?: "rejected"}")
+                    debugLog("airplay screen stream type=$type dataPort=${port ?: "rejected"}")
                     if (port != null) {
                         activeStreams.add(type)
                         result.add(linkedMapOf("type" to type, "dataPort" to port))
@@ -399,7 +451,11 @@ class AirPlaySession(
                 }
                 STREAM_TYPE_MAIN_AUDIO, STREAM_TYPE_ALT_AUDIO, STREAM_TYPE_MAIN_HIGH_AUDIO -> {
                     val streamResponse = media.onAudio(this, type, stream)
-                    Log.i(TAG, "airplay audio stream type=$type accepted=${streamResponse != null}")
+                    debugLog(
+                        "airplay audio stream type=$type accepted=${streamResponse != null} " +
+                            "dataPort=${streamResponse?.get("dataPort") ?: "none"} " +
+                            "controlPort=${streamResponse?.get("controlPort") ?: "none"}",
+                    )
                     if (streamResponse != null) {
                         activeStreams.add(type)
                         result.add(streamResponse)
@@ -407,13 +463,16 @@ class AirPlaySession(
                 }
                 STREAM_TYPE_DATA -> {
                     val streamResponse = media.onDataStream(this, stream)
-                    Log.i(TAG, "airplay data stream type=$type accepted=${streamResponse != null}")
+                    debugLog(
+                        "airplay data stream type=$type accepted=${streamResponse != null} " +
+                            "dataPort=${streamResponse?.get("dataPort") ?: "none"}",
+                    )
                     if (streamResponse != null) {
                         activeStreams.add(type)
                         result.add(streamResponse)
                     }
                 }
-                else -> Log.i(TAG, "airplay unsupported stream type=$type")
+                else -> debugLog("airplay unsupported stream type=$type")
             }
         }
         return result
@@ -427,7 +486,7 @@ class AirPlaySession(
         }
         val type = string(body["type"])
         val params = asMap(body["params"]) ?: emptyMap()
-        Log.i(TAG, "airplay command type=$type keys=${params.keys.sorted()} params=$params")
+        debugLog("airplay command type=$type keys=${params.keys.sorted()}")
         if (type == "requestUI") listener.onHostUiRequested(this)
         listener.onCommand(this, type, params)
         return RtspMessage.Response(status = 200)
@@ -443,7 +502,7 @@ class AirPlaySession(
             emptyList()
         }
 
-        Log.i(TAG, "airplay TEARDOWN types=$types activeBefore=$activeStreams")
+        debugLog("airplay TEARDOWN types=$types activeBefore=$activeStreams")
 
         if (types.isEmpty()) {
             activeStreams.toList().forEach { media.onTeardown(this, it) }
@@ -508,7 +567,7 @@ class AirPlaySession(
     private fun acceptEvent(server: ServerSocket) {
         try {
             val socket = server.accept()
-            Log.i(TAG, "airplay event connection accepted from ${socket.remoteSocketAddress}")
+            debugLog("airplay event connection accepted from ${socket.remoteSocketAddress}")
             eventSocket = socket
             val shared = pairVerify.shared
             if (shared == null) {
@@ -580,7 +639,7 @@ class AirPlaySession(
         } catch (error: Exception) {
             if (!closed.get()) Log.e(TAG, "airplay event read failed", error)
         } finally {
-            Log.i(TAG, "airplay event connection closed")
+            debugLog("airplay event connection closed")
             if (eventSocket === socket) eventSocket = null
             eventCipher = null
             safeClose(socket)
@@ -608,6 +667,8 @@ class AirPlaySession(
         const val STREAM_TYPE_DATA = 130
 
         const val READ_CHUNK_BYTES = 16 * 1024
+        const val EVENT_READY_POLL_MILLIS = 25L
+        const val NANOS_PER_MILLISECOND = 1_000_000L
     }
 }
 

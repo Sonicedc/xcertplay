@@ -40,10 +40,16 @@ class CarPlayMediaEngine(
         @Volatile var originNs: Long? = null,
     )
 
+    private data class PendingIapTunnel(
+        val bridge: AirPlayIapTunnelStream,
+        val handler: (BlockingDuplexByteStream) -> Boolean,
+    )
+
     private val streams = ConcurrentHashMap<Int, Closeable>()
     private val audioMeta = ConcurrentHashMap<Int, AudioMeta>()
     private val pendingMicrophone = ConcurrentHashMap<Int, MicrophoneConfig>()
     private val audioCaptures = ConcurrentHashMap<Int, AudioPacketCapture>()
+    private val pendingIapTunnels = ConcurrentHashMap<AirPlaySession, PendingIapTunnel>()
     @Volatile private var iapTunnelHandler: ((BlockingDuplexByteStream) -> Boolean)? = null
 
     override fun setIapTunnelHandler(handler: ((BlockingDuplexByteStream) -> Boolean)?) {
@@ -148,15 +154,12 @@ class CarPlayMediaEngine(
         )
         val tunnel = IapTunnel(key)
         val bridge = AirPlayIapTunnelStream(session, tunnel)
-        val attached = try {
-            iapTunnelHandler?.invoke(bridge) == true
-        } catch (error: Throwable) {
-            Log.w(TAG, "iAP tunnel relay attachment failed", error)
-            false
-        }
+        val handler = iapTunnelHandler
         val port = try {
-            if (attached) {
-                bridge.listen()
+            if (handler != null) {
+                val boundPort = bridge.listen()
+                replacePendingIapTunnel(session, PendingIapTunnel(bridge, handler))
+                boundPort
             } else {
                 tunnel.listen(
                     object : IapTunnel.Listener {
@@ -176,8 +179,23 @@ class CarPlayMediaEngine(
             bridge.close()
             throw error
         }
-        streams[STREAM_TYPE_DATA] = if (attached) bridge else tunnel
+        streams[STREAM_TYPE_DATA] = if (handler != null) bridge else tunnel
         return linkedMapOf("type" to STREAM_TYPE_DATA, "streamID" to 1L, "dataPort" to port)
+    }
+
+    override fun onSetupResponseSent(session: AirPlaySession) {
+        val pending = pendingIapTunnels.remove(session) ?: return
+        val attached = try {
+            pending.handler(pending.bridge)
+        } catch (error: Throwable) {
+            Log.w(TAG, "iAP tunnel relay attachment failed", error)
+            false
+        }
+        if (!attached) {
+            Log.w(TAG, "iAP tunnel relay attachment was rejected after SETUP")
+            pending.bridge.close()
+            session.close()
+        }
     }
 
     override fun onFeedback(session: AirPlaySession): Map<String, Any?>? {
@@ -210,6 +228,7 @@ class CarPlayMediaEngine(
     }
 
     override fun onTeardown(session: AirPlaySession, type: Int) {
+        if (type == STREAM_TYPE_DATA) clearPendingIapTunnel(session)
         if (pendingMicrophone.remove(type) != null) sink.onMicrophoneStopped(type)
         audioMeta.remove(type)
         audioCaptures.remove(type)?.close()
@@ -219,6 +238,7 @@ class CarPlayMediaEngine(
     }
 
     override fun onSessionClosed(session: AirPlaySession) {
+        clearPendingIapTunnel(session)
         streams.keys.filter(::isScreenStreamType).forEach { type ->
             sink.onScreenStreamActive(type, false)
         }
@@ -228,6 +248,21 @@ class CarPlayMediaEngine(
         pendingMicrophone.clear()
         audioCaptures.values.forEach(AudioPacketCapture::close)
         audioCaptures.clear()
+    }
+
+    private fun replacePendingIapTunnel(session: AirPlaySession, next: PendingIapTunnel) {
+        val previous = pendingIapTunnels.put(session, next)
+        previous?.bridge?.close()
+    }
+
+    private fun clearPendingIapTunnel(session: AirPlaySession? = null) {
+        if (session == null) {
+            val pending = pendingIapTunnels.values.toList()
+            pendingIapTunnels.clear()
+            pending.forEach { it.bridge.close() }
+            return
+        }
+        pendingIapTunnels.remove(session)?.bridge?.close()
     }
 
     private fun outputKey(session: AirPlaySession, stream: Map<String, Any?>): ByteArray? {
