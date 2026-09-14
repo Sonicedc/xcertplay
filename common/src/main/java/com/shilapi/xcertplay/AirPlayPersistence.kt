@@ -3,11 +3,14 @@ package com.shilapi.xcertplay
 import android.content.Context
 import android.os.Build
 import com.shilapi.xcertplay.airplay.AirPlayDisplaySettings
+import com.shilapi.xcertplay.airplay.AirPlayPhysicalSizeBasis
 import com.shilapi.xcertplay.airplay.CarPlayDisplayScale
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.airplay.SafeAreaCodec
 import com.shilapi.xcertplay.airplay.SafeAreaRect
+import com.shilapi.xcertplay.orchestration.ManualHotspotBand
+import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.transport.LockdownPairRecord
 import java.io.File
@@ -36,12 +39,18 @@ object AirPlayPersistence {
     private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
     private const val KEY_MANUAL_HOTSPOT_SSID = "manual_hotspot_ssid"
     private const val KEY_MANUAL_HOTSPOT_PASSPHRASE = "manual_hotspot_passphrase"
+    private const val KEY_MANUAL_HOTSPOT_BAND = "manual_hotspot_band"
+    private const val KEY_MANUAL_HOTSPOT_CHANNEL = "manual_hotspot_channel"
+    private const val KEY_MANUAL_HOTSPOT_SECURITY = "manual_hotspot_security"
     private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
     private const val KEY_MANUFACTURER = "manufacturer"
     private const val KEY_MODEL = "model"
     private const val KEY_OEM_LABEL = "oem_label"
     private const val KEY_FPS = "display_fps"
     private const val KEY_WIDTH_PHYSICAL_MM = "display_width_physical_mm"
+    private const val KEY_PHYSICAL_SIZE_BASIS = "display_physical_size_basis"
+    private const val KEY_MAX_DETECTED_WIDTH = "display_max_detected_width"
+    private const val KEY_MAX_DETECTED_HEIGHT = "display_max_detected_height"
     private const val KEY_RIGHT_HAND_DRIVE = "right_hand_drive"
     private const val KEY_HIDE_TOP_BAR = "hide_top_bar"
     private const val KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar"
@@ -150,6 +159,47 @@ object AirPlayPersistence {
             .apply()
     }
 
+    fun loadManualHotspotBand(context: Context): ManualHotspotBand {
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MANUAL_HOTSPOT_BAND, null)
+        return ManualHotspotBand.entries.firstOrNull { it.name == stored }
+            ?: ManualHotspotBand.AUTO
+    }
+
+    fun saveManualHotspotBand(context: Context, band: ManualHotspotBand) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MANUAL_HOTSPOT_BAND, band.name)
+            .apply()
+    }
+
+    fun loadManualHotspotChannel(context: Context): Int =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_MANUAL_HOTSPOT_CHANNEL, 0)
+            .coerceIn(0, 196)
+
+    fun saveManualHotspotChannel(context: Context, channel: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_MANUAL_HOTSPOT_CHANNEL, channel.coerceIn(0, 196))
+            .apply()
+    }
+
+    fun loadManualHotspotSecurity(context: Context): ManualHotspotSecurity {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val stored = prefs.getString(KEY_MANUAL_HOTSPOT_SECURITY, null)
+        return ManualHotspotSecurity.entries.firstOrNull { it.name == stored }
+            ?: if (loadManualHotspotPassphrase(context).isEmpty()) {
+                ManualHotspotSecurity.OPEN
+            } else {
+                ManualHotspotSecurity.WPA2
+            }
+    }
+
+    fun saveManualHotspotSecurity(context: Context, security: ManualHotspotSecurity) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MANUAL_HOTSPOT_SECURITY, security.name)
+            .apply()
+    }
+
     fun loadDebugLogsEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_DEBUG_LOGS_ENABLED, false)
@@ -240,6 +290,36 @@ object AirPlayPersistence {
                 KEY_WIDTH_PHYSICAL_MM,
                 AirPlayDisplaySettings.sanitizeWidthPhysicalMm(widthPhysicalMm),
             )
+            .apply()
+    }
+
+    fun loadPhysicalSizeBasis(context: Context): AirPlayPhysicalSizeBasis {
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_PHYSICAL_SIZE_BASIS, null)
+        return AirPlayPhysicalSizeBasis.entries.firstOrNull { it.name == stored }
+            ?: AirPlayDisplaySettings.DEFAULT_PHYSICAL_SIZE_BASIS
+    }
+
+    fun savePhysicalSizeBasis(context: Context, basis: AirPlayPhysicalSizeBasis) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_PHYSICAL_SIZE_BASIS, basis.name)
+            .apply()
+    }
+
+    fun loadMaximumDetectedDisplay(context: Context): Pair<Int, Int> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_MAX_DETECTED_WIDTH, 0) to
+            prefs.getInt(KEY_MAX_DETECTED_HEIGHT, 0)
+    }
+
+    fun saveMaximumDetectedDisplay(
+        context: Context,
+        widthPixels: Int,
+        heightPixels: Int,
+    ) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_MAX_DETECTED_WIDTH, widthPixels.coerceAtLeast(0))
+            .putInt(KEY_MAX_DETECTED_HEIGHT, heightPixels.coerceAtLeast(0))
             .apply()
     }
 

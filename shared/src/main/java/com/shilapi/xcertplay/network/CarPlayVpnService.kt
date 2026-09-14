@@ -186,6 +186,7 @@ class CarPlayVpnService : VpnService() {
                 Log.i(TAG, "airplay connection accepted from ${socket.remoteSocketAddress}")
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
+                socket.setSoLinger(true, 0)
                 val session = synchronized(this) {
                     if (!active.get()) {
                         socket.close()

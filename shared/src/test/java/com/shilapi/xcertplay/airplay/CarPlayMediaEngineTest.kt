@@ -52,10 +52,11 @@ class CarPlayMediaEngineTest {
             isAccessible = true
         }
         @Suppress("UNCHECKED_CAST")
-        val streams = streamsField.get(engine) as MutableMap<Int, Closeable>
-        streams[110] = Closeable {}
-        streams[111] = Closeable {}
-        streams[100] = Closeable {}
+        val streams = streamsField.get(engine) as
+            MutableMap<CarPlayMediaEngine.StreamKey, Closeable>
+        streams[CarPlayMediaEngine.StreamKey(session, 110)] = Closeable {}
+        streams[CarPlayMediaEngine.StreamKey(session, 111)] = Closeable {}
+        streams[CarPlayMediaEngine.StreamKey(session, 100)] = Closeable {}
 
         engine.onSessionClosed(session)
         session.close()

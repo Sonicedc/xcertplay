@@ -107,11 +107,39 @@ object AirPlaySafeArea {
             .coerceIn(left + 1, displayWidthPixels)
         val bottom = scaleCoordinate(rect.bottom, activityHeightPixels, displayHeightPixels)
             .coerceIn(top + 1, displayHeightPixels)
+        val aligned = alignDimensionsToEven(
+            SafeAreaRect(left, top, right, bottom),
+            displayWidthPixels,
+            displayHeightPixels,
+        )
         return AirPlayInsets(
-            top = top,
-            bottom = displayHeightPixels - bottom,
-            left = left,
-            right = displayWidthPixels - right,
+            top = aligned.top,
+            bottom = displayHeightPixels - aligned.bottom,
+            left = aligned.left,
+            right = displayWidthPixels - aligned.right,
+        )
+    }
+
+    private fun alignDimensionsToEven(
+        rect: SafeAreaRect,
+        widthPixels: Int,
+        heightPixels: Int,
+    ): SafeAreaRect {
+        var left = rect.left
+        var top = rect.top
+        var right = rect.right
+        var bottom = rect.bottom
+        if ((right - left) % 2 != 0) {
+            if (right < widthPixels) right += 1 else left -= 1
+        }
+        if ((bottom - top) % 2 != 0) {
+            if (bottom < heightPixels) bottom += 1 else top -= 1
+        }
+        return SafeAreaRect(
+            left = left.coerceIn(0, widthPixels - 1),
+            top = top.coerceIn(0, heightPixels - 1),
+            right = right.coerceIn(left + 1, widthPixels),
+            bottom = bottom.coerceIn(top + 1, heightPixels),
         )
     }
 

@@ -14,19 +14,38 @@ import kotlin.math.min
 internal class AirPlayIapTunnelStream(
     private val session: AirPlaySession,
     private val tunnel: IapTunnel,
+    private val sendCommand: (ByteArray, Long) -> Boolean = { data, timeoutMillis ->
+        session.sendIapMessage(data, timeoutMillis)
+    },
 ) : BlockingDuplexByteStream {
     private val lock = Object()
     private val pending = ArrayDeque<ByteArray>()
     private var pendingBytes = 0
     private var closed = false
-    private var peerEnded = false
+    private var terminalFailure: Throwable? = null
+    private var closeLocation: String? = null
 
     fun listen(): Int = tunnel.listen(
         object : IapTunnel.Listener {
+            override fun onOpen(remoteAddress: String?) {
+                session.logTrace(
+                    "AirPlay iAP tunnel connected remote=${remoteAddress ?: "unknown"}",
+                )
+            }
+
             override fun onIap(bytes: ByteArray) = offer(bytes)
 
+            override fun onDebug(message: String) {
+                session.logTrace(message)
+            }
+
             override fun onClosed(cause: Throwable?) {
-                val shouldCloseSession = markPeerEnded()
+                session.logTrace(
+                    "AirPlay iAP tunnel closed cause=" +
+                        "${cause?.javaClass?.simpleName ?: "peer EOF"}: " +
+                        "${cause?.message ?: "no detail"}",
+                )
+                val shouldCloseSession = markFailed(cause)
                 if (shouldCloseSession) session.close()
             }
         },
@@ -34,15 +53,17 @@ internal class AirPlayIapTunnelStream(
 
     override fun send(data: ByteArray) {
         synchronized(lock) {
-            if (closed || peerEnded) throw IOException("AirPlay iAP tunnel is closed")
+            throwTerminalFailureLocked()
+            if (closed) throw closedFailureLocked()
         }
         if (!tunnel.awaitPeerConnection(PEER_CONNECT_TIMEOUT_MILLIS)) {
             throw IOException("CarPlay iAP tunnel peer did not connect")
         }
         synchronized(lock) {
-            if (closed || peerEnded) throw IOException("AirPlay iAP tunnel is closed")
+            throwTerminalFailureLocked()
+            if (closed) throw closedFailureLocked()
         }
-        if (!session.sendIapMessage(data, EVENT_READY_TIMEOUT_MILLIS)) {
+        if (!sendCommand(data, EVENT_READY_TIMEOUT_MILLIS)) {
             throw IOException("AirPlay event channel rejected an iAP message")
         }
     }
@@ -55,7 +76,8 @@ internal class AirPlayIapTunnelStream(
         synchronized(lock) {
             while (true) {
                 takePendingLocked(maxBytes)?.let { return it }
-                if (closed || peerEnded) return EMPTY
+                throwTerminalFailureLocked()
+                if (closed) return EMPTY
                 val remainingNanos = deadlineNanos - System.nanoTime()
                 if (remainingNanos <= 0) return null
                 try {
@@ -75,6 +97,7 @@ internal class AirPlayIapTunnelStream(
         synchronized(lock) {
             if (closed) return
             closed = true
+            closeLocation = closeCaller()
             lock.notifyAll()
         }
         tunnel.close()
@@ -83,9 +106,9 @@ internal class AirPlayIapTunnelStream(
     private fun offer(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         synchronized(lock) {
-            if (closed || peerEnded) return
+            if (closed || terminalFailure != null) return
             if (pendingBytes + bytes.size > MAX_PENDING_BYTES) {
-                peerEnded = true
+                terminalFailure = IOException("AirPlay iAP tunnel pending-data limit exceeded")
                 lock.notifyAll()
                 tunnel.close()
                 return
@@ -96,14 +119,38 @@ internal class AirPlayIapTunnelStream(
         }
     }
 
-    private fun markPeerEnded(): Boolean {
+    private fun markFailed(cause: Throwable?): Boolean {
         synchronized(lock) {
-            if (closed || peerEnded) return false
-            peerEnded = true
+            if (closed || terminalFailure != null) return false
+            terminalFailure = cause ?: IOException("AirPlay iAP tunnel terminated")
             lock.notifyAll()
             return true
         }
     }
+
+    private fun throwTerminalFailureLocked() {
+        val failure = terminalFailure ?: return
+        throw IOException(
+            "AirPlay iAP tunnel failed: " +
+                "${failure.javaClass.simpleName}: ${failure.message ?: "unknown error"}",
+            failure,
+        )
+    }
+
+    private fun closedFailureLocked(): IOException = IOException(
+        buildString {
+            append("AirPlay iAP tunnel is closed")
+            closeLocation?.let { append("; requested by $it") }
+        },
+    )
+
+    private fun closeCaller(): String =
+        Thread.currentThread().stackTrace
+            .drop(2)
+            .take(8)
+            .joinToString(" <- ") { frame ->
+                "${frame.className.substringAfterLast('.')}.${frame.methodName}:${frame.lineNumber}"
+            }
 
     private fun takePendingLocked(maxBytes: Int): ByteArray? {
         val chunk = pending.pollFirst() ?: return null

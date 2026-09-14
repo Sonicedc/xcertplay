@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.transport
 
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
+import java.io.ByteArrayOutputStream
 import kotlin.math.min
 
 /**
@@ -53,6 +54,7 @@ class Iap2WirelessControlClient(
 
         var forwardedFrames = 0
         var wifiConfigurationsSent = 0
+        var carPlayStartSessionsSent = 0
         var preTransportWiFiConfigurationsSent = 0
         var postTransportWiFiConfigurationsSent = 0
         var transportNotificationSeen = false
@@ -67,6 +69,7 @@ class Iap2WirelessControlClient(
                         stage,
                         forwardedFrames,
                         wifiConfigurationsSent,
+                        carPlayStartSessionsSent,
                         transportNotificationSeen,
                         postTransportWiFiConfigurationsSent,
                         wirelessCarPlayConnectingSeen,
@@ -89,6 +92,7 @@ class Iap2WirelessControlClient(
                             stage,
                             forwardedFrames,
                             wifiConfigurationsSent,
+                            carPlayStartSessionsSent,
                             transportNotificationSeen,
                             postTransportWiFiConfigurationsSent,
                             wirelessCarPlayConnectingSeen,
@@ -100,6 +104,7 @@ class Iap2WirelessControlClient(
                             stage,
                             forwardedFrames,
                             wifiConfigurationsSent,
+                            carPlayStartSessionsSent,
                             transportNotificationSeen,
                             postTransportWiFiConfigurationsSent,
                             wirelessCarPlayConnectingSeen,
@@ -144,6 +149,14 @@ class Iap2WirelessControlClient(
                             }
                             onProgress("iap2 tx=0x5703 accessory-wifi-configuration")
                         }
+                    }
+
+                    CARPLAY_AVAILABILITY -> {
+                        onProgress("iap2 rx=0x4300 carplay-availability")
+                        send(carPlayStartSession(endpoint), deadlineNanos)
+                        stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
+                        carPlayStartSessionsSent++
+                        onProgress("iap2 tx=0x4301 carplay-start-session")
                     }
 
                     WIRELESS_CARPLAY_UPDATE -> {
@@ -244,6 +257,8 @@ class Iap2WirelessControlClient(
     companion object {
         private const val REQUEST_ACCESSORY_WIFI_CONFIGURATION = 0x5702
         private const val ACCESSORY_WIFI_CONFIGURATION = 0x5703
+        private const val CARPLAY_AVAILABILITY = 0x4300
+        private const val CARPLAY_START_SESSION = 0x4301
         private const val WIRELESS_CARPLAY_UPDATE = 0x4e0d
         private const val DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION = 0x4e0e
         private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
@@ -264,6 +279,27 @@ class Iap2WirelessControlClient(
                 Iap2CsmParameter(3, byteArrayOf(endpoint.security.wireValue.toByte())),
                 Iap2CsmParameter(4, byteArrayOf(endpoint.channel.toByte())),
             )
+
+        /** Wireless 0x4301 reply carrying the receiver address, port and pairing identity. */
+        fun carPlayStartSession(endpoint: Iap2WirelessCarPlayEndpoint): CsmFrame {
+            val wireless = Iap2CsmParameters.encode(
+                listOf(
+                    Iap2CsmParameter(0, nulTerminated(endpoint.ssid)),
+                    Iap2CsmParameter(1, nulTerminated(endpoint.passphrase)),
+                    Iap2CsmParameter(2, byteArrayOf(endpoint.channel.toByte())),
+                    Iap2CsmParameter(3, nulTerminatedList(endpoint.ipAddresses)),
+                    Iap2CsmParameter(4, byteArrayOf(endpoint.security.wireValue.toByte())),
+                ),
+            )
+            return frame(
+                CARPLAY_START_SESSION,
+                Iap2CsmParameter(1, wireless),
+                Iap2CsmParameter(2, u32(endpoint.airPlayPort)),
+                Iap2CsmParameter(3, nulTerminated(endpoint.deviceIdentifier)),
+                Iap2CsmParameter(4, nulTerminated(endpoint.publicKey)),
+                Iap2CsmParameter(5, nulTerminated(endpoint.sourceVersion)),
+            )
+        }
 
         internal fun wirelessCarPlayUpdateStatus(frame: CsmFrame): Int? {
             if (frame.messageId != WIRELESS_CARPLAY_UPDATE) return null
@@ -294,6 +330,19 @@ class Iap2WirelessControlClient(
             CsmFrame(messageId, Iap2CsmParameters.encode(parameters.asList()))
 
         private fun nulTerminated(value: String): ByteArray = value.encodeToByteArray() + byteArrayOf(0)
+
+        private fun nulTerminatedList(values: List<String>): ByteArray {
+            val output = ByteArrayOutputStream()
+            for (value in values) output.write(nulTerminated(value))
+            return output.toByteArray()
+        }
+
+        private fun u32(value: Int): ByteArray = byteArrayOf(
+            (value ushr 24).toByte(),
+            (value ushr 16).toByte(),
+            (value ushr 8).toByte(),
+            value.toByte(),
+        )
 
         private fun later(
             current: Iap2WirelessControlStage,
@@ -330,13 +379,20 @@ enum class Iap2WirelessSecurity(val wireValue: Int) {
     WPA3_ONLY(4),
 }
 
-/** Wireless hotspot credentials sent in 0x5703. */
+/** Wireless hotspot and AirPlay endpoint sent in 0x5703 and 0x4301. */
 class Iap2WirelessCarPlayEndpoint(
     val ssid: String,
     val passphrase: String,
     val channel: Int,
     val security: Iap2WirelessSecurity,
+    ipAddresses: List<String>,
+    val airPlayPort: Int,
+    val deviceIdentifier: String,
+    val publicKey: String,
+    val sourceVersion: String,
 ) {
+    val ipAddresses: List<String> = ipAddresses.toList()
+
     init {
         require(ssid.isNotBlank()) { "ssid is required and must not be blank" }
         require('\u0000' !in ssid) { "ssid must not contain U+0000" }
@@ -345,6 +401,17 @@ class Iap2WirelessCarPlayEndpoint(
             require(passphrase.isNotEmpty()) { "passphrase is required for secured Wi-Fi" }
         }
         require(channel in 0..0xff) { "channel must be in 0..255" }
+        require(ipAddresses.isNotEmpty()) { "At least one wireless IP address is required" }
+        require(ipAddresses.all { it.isNotBlank() && '\u0000' !in it }) {
+            "Every wireless IP address must be non-blank and must not contain U+0000"
+        }
+        require(airPlayPort in 1..65535) { "airPlayPort must be in 1..65535" }
+        require(deviceIdentifier.isNotBlank()) { "deviceIdentifier is required and must not be blank" }
+        require('\u0000' !in deviceIdentifier) { "deviceIdentifier must not contain U+0000" }
+        require(publicKey.isNotEmpty()) { "publicKey is required and must not be empty" }
+        require('\u0000' !in publicKey) { "publicKey must not contain U+0000" }
+        require(sourceVersion.isNotEmpty()) { "sourceVersion is required and must not be empty" }
+        require('\u0000' !in sourceVersion) { "sourceVersion must not contain U+0000" }
     }
 }
 
@@ -353,6 +420,7 @@ enum class Iap2WirelessControlStage {
     AUTHENTICATED,
     SUBSCRIBED,
     WIFI_CONFIG_SENT,
+    CARPLAY_START_SENT,
     TRANSPORT_NOTIFIED,
     POST_TRANSPORT_WIFI_CONFIG_SENT,
 }
@@ -365,6 +433,7 @@ data class Iap2WirelessControlResult(
     val stage: Iap2WirelessControlStage,
     val forwardedFrames: Int,
     val wifiConfigurationsSent: Int,
+    val carPlayStartSessionsSent: Int,
     val transportNotificationSeen: Boolean,
     val postTransportWiFiConfigurationsSent: Int,
     val wirelessCarPlayConnectingSeen: Boolean,

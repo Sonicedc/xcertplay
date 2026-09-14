@@ -5,20 +5,47 @@ import org.junit.Test
 
 class AirPlayDisplaySettingsTest {
     @Test
-    fun fpsUsesThirtyToSixtyInFiveFrameSteps() {
-        assertEquals(30, AirPlayDisplaySettings.sanitizeFps(0))
-        assertEquals(35, AirPlayDisplaySettings.sanitizeFps(37))
-        assertEquals(40, AirPlayDisplaySettings.sanitizeFps(38))
-        assertEquals(60, AirPlayDisplaySettings.sanitizeFps(99))
-        assertEquals(6, AirPlayDisplaySettings.fpsProgress(60))
+    fun maximumObservedWidthScalesPhysicalSizeWithCurrentActivityWidth() {
+        val size = AirPlayDisplaySettings.resolvePhysicalSizeMm(
+            currentWidthPixels = 768,
+            currentHeightPixels = 800,
+            maximumWidthPixels = 1920,
+            maximumHeightPixels = 1080,
+            referenceMillimeters = 200,
+            basis = AirPlayPhysicalSizeBasis.WIDTH,
+        )
+
+        assertEquals(80, size.widthMm)
+        assertEquals(83, size.heightMm)
     }
 
     @Test
-    fun physicalWidthUsesOneHundredToFourHundredInFiftyMillimeterSteps() {
-        assertEquals(100, AirPlayDisplaySettings.sanitizeWidthPhysicalMm(0))
-        assertEquals(100, AirPlayDisplaySettings.sanitizeWidthPhysicalMm(120))
-        assertEquals(150, AirPlayDisplaySettings.sanitizeWidthPhysicalMm(125))
-        assertEquals(400, AirPlayDisplaySettings.sanitizeWidthPhysicalMm(999))
-        assertEquals(2, AirPlayDisplaySettings.widthPhysicalMmProgress(200))
+    fun maximumObservedHeightScalesPhysicalSizeWithCurrentActivityHeight() {
+        val size = AirPlayDisplaySettings.resolvePhysicalSizeMm(
+            currentWidthPixels = 1920,
+            currentHeightPixels = 978,
+            maximumWidthPixels = 1920,
+            maximumHeightPixels = 1080,
+            referenceMillimeters = 200,
+            basis = AirPlayPhysicalSizeBasis.HEIGHT,
+        )
+
+        assertEquals(356, size.widthMm)
+        assertEquals(181, size.heightMm)
+    }
+
+    @Test
+    fun maximumResolutionKeepsConfiguredReferenceLength() {
+        val size = AirPlayDisplaySettings.resolvePhysicalSizeMm(
+            currentWidthPixels = 1920,
+            currentHeightPixels = 1080,
+            maximumWidthPixels = 1920,
+            maximumHeightPixels = 1080,
+            referenceMillimeters = 250,
+            basis = AirPlayPhysicalSizeBasis.WIDTH,
+        )
+
+        assertEquals(250, size.widthMm)
+        assertEquals(141, size.heightMm)
     }
 }

@@ -2,27 +2,36 @@
 
 English | [中文](README.zh-CN.md)
 
-`xcertplay` is an Android head-unit CarPlay receiver. It connects to an iPhone
-over Android USB Host and uses a CH341 USB-I2C bridge chip or the board's I2C
-bus to access the MFi authentication coprocessor.
+`xcertplay` is an Android head-unit CarPlay receiver. It supports connecting to
+the MFI chip through a CH341 I2C bridge or directly through the board's I2C
+controller, and supports both wired and wireless CarPlay connections.
 
 > Still under active development.
 
-## Overview
+## Features
 
-- App modules for projected Android Auto and Android Automotive OS.
-- A unified I2C transport for the CH341 bridge chip and native `/dev/i2c-N`
-  devices.
-- MFi chip discovery, certificate reads, and challenge-response signing.
-- iPhone USB bring-up, USBMUX, Lockdown pairing, carkit TLS, and iAP2 control.
-- USB NCM data transport bridged to an Android VPN IPv6 endpoint.
-- AirPlay pairing, encrypted control and event channels, HID input, NTP, media decryption, video/audio rendering, and touch forwarding.
+- CarPlay host applications for Android and Android Automotive OS.
+- Support for MFI chips connected through a CH341 bridge or native
+  `/dev/i2c-N` devices.
+- Wired and wireless CarPlay connections.
+- CarPlay Ultra triggering (the protocol stack is untested/incomplete, but it
+  can trigger the CarPlay Ultra prompt on an iPhone).
+- Voice, navigation, and music multi-channel audio output mapped to the
+  corresponding Android channels.
+- Dynamic Activity resizing with automatic re-handshaking to the new
+  resolution.
+- Vehicle head-unit location reporting.
+- Android 9 (API 28) support.
 
 ## Current progress
 
-It works on my own car, both wireless and wired. Now drawing PCB...
+It works 👍. It has been tested on car head units and phones. If you encounter
+an incompatible car head unit, please open an issue and attach your log from
+`/sdcard/Android/data/com.shilapi.xcertplay/files/logs/xcertplay.log`.
 
-PCB: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
+Adapter board: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
+
+Waiting for the MFI chip adapter board to arrive...
 
 ## Project structure
 
@@ -41,8 +50,6 @@ PCB: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 - Android 9 (API 28) or newer.
   On Android 9, Wi-Fi P2P 5 GHz mode is unavailable and LocalOnlyHotspot is used instead.
 - Android NDK `28.2.13676358`.
-- Gradle Wrapper `9.5.0`, Android Gradle Plugin `9.3.0`, and Kotlin `2.2.10`
-  are already configured in the repository.
 - A physical USB Host/OTG Android device and MFi hardware are required for
   hardware validation.
 
@@ -67,18 +74,10 @@ Unsigned release APKs:
 .\gradlew.bat :mobile:assembleRelease :automotive:assembleRelease
 ```
 
-Expected outputs:
-
-```text
-mobile/build/outputs/apk/debug/mobile-debug.apk
-automotive/build/outputs/apk/debug/automotive-debug.apk
-mobile/build/outputs/apk/release/mobile-release-unsigned.apk
-automotive/build/outputs/apk/release/automotive-release-unsigned.apk
-```
-
 ## Acknowledgements
 
-Thanks to [LIVI](https://github.com/f-io/LIVI), providing reference for carplay handshaking process.
+Thanks to [LIVI](https://github.com/f-io/LIVI) for providing important
+reference for this project.
 
 ## License
 

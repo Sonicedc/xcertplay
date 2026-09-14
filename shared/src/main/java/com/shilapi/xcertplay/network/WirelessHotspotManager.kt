@@ -65,3 +65,28 @@ internal fun wifiChannelToFrequencyMhz(channel: Int, band: Int? = null): Int? = 
     band == 3 && channel in 1..233 -> 5950 + channel * 5
     else -> null
 }
+
+/** Maps Android's [android.net.wifi.SoftApConfiguration] band constants to a user-facing label. */
+internal fun wifiBandLabel(band: Int?): String? = when (band) {
+    1 -> "2.4 GHz"
+    2 -> "5 GHz"
+    3 -> "6 GHz"
+    else -> null
+}
+
+/**
+ * Returns only a channel observed from Android. An unknown channel must stay unknown instead of
+ * echoing the user's desired channel back to the iPhone in 0x5703.
+ */
+internal fun observedManualHotspotChannel(
+    apChannel: Int,
+    connectionFrequencyMHz: Int?,
+    scanFrequencyMHz: Int?,
+    apFrequencyMHz: Int?,
+): Int {
+    if (apChannel > 0) return apChannel
+    connectionFrequencyMHz?.let(::wifiFrequencyMhzToChannel)?.let { return it }
+    scanFrequencyMHz?.let(::wifiFrequencyMhzToChannel)?.let { return it }
+    apFrequencyMHz?.let(::wifiFrequencyMhzToChannel)?.let { return it }
+    return 0
+}

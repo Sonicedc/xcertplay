@@ -25,6 +25,7 @@ object CarPlayDisplayScale {
 
     private fun scalePixels(pixels: Int, tenths: Int): Int {
         require(pixels > 0) { "pixels must be positive" }
-        return ((pixels.toLong() * tenths + 5L) / 10L).toInt().coerceAtLeast(1)
+        val scaled = ((pixels.toLong() * tenths + 5L) / 10L).toInt().coerceAtLeast(1)
+        return if (scaled % 2 == 0) scaled else scaled + 1
     }
 }

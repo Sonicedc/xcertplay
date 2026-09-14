@@ -226,5 +226,9 @@ class Iap2CsmChannel private constructor(
         /** Opens the owned iAP2 link over an owned wireless RFCOMM stream. */
         fun openWireless(underlying: BlockingDuplexByteStream): Iap2CsmChannel =
             Iap2CsmChannel(Iap2LinkChannel.openWireless(underlying))
+
+        /** Opens the owned iAP2 link over an AirPlay type-130 tunnel. */
+        fun openTunnel(underlying: BlockingDuplexByteStream): Iap2CsmChannel =
+            Iap2CsmChannel(Iap2LinkChannel.openTunnel(underlying))
     }
 }

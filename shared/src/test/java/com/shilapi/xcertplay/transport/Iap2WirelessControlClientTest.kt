@@ -19,6 +19,18 @@ class Iap2WirelessControlClientTest {
     }
 
     @Test
+    fun carPlayStartSessionMatchesLiviWirelessVector() {
+        val frame = Iap2WirelessControlClient.carPlayStartSession(endpoint())
+
+        assertEquals(
+            "40400060430100350001000900004c49564900000e000173656372657431323300000500022400100003" +
+                "3139322e3136382e322e31000005000403000800020000c000000a00036465762d3100000b000461" +
+                "61626263630000080005312e3000",
+            frame.encodedFrame().hex(),
+        )
+    }
+
+    @Test
     fun wirelessIdentificationAdvertisesTransportComponentsWithoutUsbHost() {
         val config = Iap2IdentificationConfig(
             name = "LIVI",
@@ -52,12 +64,12 @@ class Iap2WirelessControlClientTest {
         val sent = u16Values(parameters.single { it.id == 6 }.payload)
         val received = u16Values(parameters.single { it.id == 7 }.payload)
         assertTrue(0x5703 in sent)
-        assertFalse(0x4301 in sent)
+        assertTrue(0x4301 in sent)
         assertFalse(0xae03 in sent)
+        assertTrue(0x4300 in received)
         assertTrue(0x4e0d in received)
         assertTrue(0x4e0e in received)
         assertTrue(0x5702 in received)
-        assertFalse(0x4300 in received)
     }
 
     @Test
@@ -97,6 +109,11 @@ class Iap2WirelessControlClientTest {
         passphrase = "secret123",
         channel = 36,
         security = Iap2WirelessSecurity.WPA3_TRANSITION,
+        ipAddresses = listOf("192.168.2.1"),
+        airPlayPort = 49152,
+        deviceIdentifier = "dev-1",
+        publicKey = "aabbcc",
+        sourceVersion = "1.0",
     )
 
     private fun u16Values(bytes: ByteArray): List<Int> =

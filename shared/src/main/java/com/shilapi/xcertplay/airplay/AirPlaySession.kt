@@ -84,6 +84,7 @@ class AirPlaySession(
     private val eventThreads = CopyOnWriteArrayList<Thread>()
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
+    val localAddress: InetAddress? = socket.localAddress
     private val peerAddress: InetAddress? = socket.inetAddress
     internal val remoteAddress: InetAddress?
         get() = (socket.remoteSocketAddress as? InetSocketAddress)?.address
@@ -91,6 +92,10 @@ class AirPlaySession(
     val sharedSecret: ByteArray? get() = pairVerify.shared?.copyOf()
 
     fun syncedNtp(): BigInteger = ntp.syncedNtp()
+
+    internal fun logDebug(message: String) = debugLog(message)
+
+    internal fun logTrace(message: String) = trace(message)
 
     fun start() {
         Thread(::runControl, "airplay-control").apply {
@@ -124,6 +129,7 @@ class AirPlaySession(
             "Content-Type: $PLIST_CONTENT_TYPE\r\n" +
             "Content-Length: ${body.size}\r\n" +
             "CSeq: $eventCseq\r\n\r\n"
+        trace("airplay event tx headers=$head bodyHex=${body.toHex()}")
         return try {
             val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
             val output = socket.getOutputStream()
@@ -277,6 +283,10 @@ class AirPlaySession(
                         "airplay rx ${request.method} ${request.path} cseq=$cseq body=${request.body.size}",
                         showInDebugOverlay,
                     )
+                    trace(
+                        "airplay control rx headers=${request.headers} " +
+                            "bodyHex=${request.body.toHex()}",
+                    )
                     val response = try {
                         handle(request)
                     } catch (error: Exception) {
@@ -292,6 +302,7 @@ class AirPlaySession(
                         showInDebugOverlay,
                     )
                     val wire = RtspMessage.buildResponse(request, response)
+                    trace("airplay control tx wireHex=${wire.toHex()}")
                     output.write(cipher?.encrypt(wire) ?: wire)
                     if (cipher == null && pairVerify.controlKeys != null) {
                         val keys = pairVerify.controlKeys!!
@@ -352,6 +363,7 @@ class AirPlaySession(
                         "audioFormats=${(info["audioFormats"] as? List<*>)?.size ?: 0} " +
                         "audioLatencies=${(info["audioLatencies"] as? List<*>)?.size ?: 0}",
                 )
+                debugLog("airplay /info displays=${info["displays"]}")
                 RtspMessage.Response(
                     headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
                     body = BplistCodec.encode(info),
@@ -391,6 +403,14 @@ class AirPlaySession(
         }
     }
 
+    private fun trace(message: String) {
+        try {
+            listener.onDebugLog("TRACE $message")
+        } catch (error: Exception) {
+            Log.w(TAG, "trace log callback failed", error)
+        }
+    }
+
     private fun handleSetup(request: RtspMessage.Request): RtspMessage.Response {
         val dict = try {
             asMap(BplistCodec.decode(request.body)) ?: return RtspMessage.Response(status = 400)
@@ -401,7 +421,10 @@ class AirPlaySession(
         debugLog("airplay SETUP keys=${dict.keys.sorted()}")
         val streams = dict["streams"] as? List<*>
         if (streams != null) {
-            val body = BplistCodec.encode(linkedMapOf("streams" to handleStreams(streams)))
+            val responseStreams = handleStreams(streams)
+            debugLog("airplay SETUP response streams=$responseStreams")
+            val body = BplistCodec.encode(linkedMapOf("streams" to responseStreams))
+            trace("airplay SETUP response bplistHex=${body.toHex()}")
             return RtspMessage.Response(headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE), body = body)
         }
 
@@ -439,7 +462,7 @@ class AirPlaySession(
         for (entry in streams) {
             val stream = asMap(entry) ?: continue
             val type = long(stream["type"])?.toInt() ?: continue
-            debugLog("airplay SETUP stream type=$type keys=${stream.keys.sorted()}")
+            debugLog("airplay SETUP stream type=$type payload=$stream")
             when (type) {
                 STREAM_TYPE_MAIN_SCREEN, STREAM_TYPE_ALT_SCREEN -> {
                     val port = media.onScreen(this, type, stream)
@@ -493,8 +516,11 @@ class AirPlaySession(
     }
 
     private fun handleTeardown(request: RtspMessage.Request): RtspMessage.Response {
+        var decodedBody: Any? = null
         val types = try {
-            val dict = asMap(BplistCodec.decode(request.body))
+            val decoded = BplistCodec.decode(request.body)
+            decodedBody = decoded
+            val dict = asMap(decoded)
             (dict?.get("streams") as? List<*>)
                 ?.mapNotNull { entry -> long(asMap(entry)?.get("type"))?.toInt() }
                 ?: emptyList()
@@ -502,7 +528,11 @@ class AirPlaySession(
             emptyList()
         }
 
-        debugLog("airplay TEARDOWN types=$types activeBefore=$activeStreams")
+        debugLog(
+            "airplay TEARDOWN types=$types activeBefore=$activeStreams " +
+                "body=${request.body.size} bytes payload=$decodedBody",
+        )
+        trace("airplay TEARDOWN raw${request.body.size}Hex=${request.body.toHex()}")
 
         if (types.isEmpty()) {
             activeStreams.toList().forEach { media.onTeardown(this, it) }
@@ -567,6 +597,7 @@ class AirPlaySession(
     private fun acceptEvent(server: ServerSocket) {
         try {
             val socket = server.accept()
+            socket.setSoLinger(true, 0)
             debugLog("airplay event connection accepted from ${socket.remoteSocketAddress}")
             eventSocket = socket
             val shared = pairVerify.shared
@@ -625,11 +656,15 @@ class AirPlaySession(
                 plaintext = parsed.rest
                 for (message in parsed.messages) {
                     if (message.method.startsWith("RTSP/") || message.method.startsWith("HTTP/")) continue
-                    Log.i(
-                        TAG,
+                    debugLog(
                         "airplay event rx ${message.method} ${message.path} cseq=${message.headers["cseq"] ?: "-"} body=${message.body.size}",
                     )
                     val response = RtspMessage.buildResponse(message, RtspMessage.Response(status = 200))
+                    trace(
+                        "airplay event rx headers=${message.headers} " +
+                            "bodyHex=${message.body.toHex()}",
+                    )
+                    trace("airplay event tx wireHex=${response.toHex()}")
                     synchronized(eventWriteLock) {
                         output.write(cipher.encrypt(response))
                         output.flush()
@@ -679,6 +714,9 @@ internal fun safeClose(closeable: Closeable?) {
         // Best-effort close.
     }
 }
+
+private fun ByteArray.toHex(): String =
+    joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
 private fun asMap(value: Any?): Map<String, Any?>? {
     val map = value as? Map<*, *> ?: return null

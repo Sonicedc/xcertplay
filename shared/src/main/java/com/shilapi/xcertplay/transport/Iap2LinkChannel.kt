@@ -362,6 +362,14 @@ class Iap2LinkChannel private constructor(
             Iap2LinkChannel(underlying, WIRELESS_LINK_CONFIG, initiateNegotiation = false)
                 .also { it.worker.start() }
 
+        /**
+         * Opens the iAP2 link carried by an AirPlay type-130 tunnel. The accessory initiates
+         * synchronization and zero-acknowledgement mode matches the Wi-Fi transport.
+         */
+        fun openTunnel(underlying: BlockingDuplexByteStream): Iap2LinkChannel =
+            Iap2LinkChannel(underlying, WIRED_LINK_CONFIG, initiateNegotiation = true)
+                .also { it.worker.start() }
+
         private fun nowMillis(): Long = System.nanoTime() / NANOS_PER_MILLISECOND
     }
 }

@@ -76,6 +76,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 sealed class CarPlayStatus {
     data object DiscoveringMfi : CarPlayStatus()
@@ -108,6 +109,12 @@ sealed class CarPlayStatus {
     data object ControlEnded : CarPlayStatus()
     data class Failed(val message: String) : CarPlayStatus()
 }
+
+internal fun isWirelessHandoffInProgress(
+    handoffRequested: Boolean,
+    tunnelActive: Boolean,
+    sessionActive: Boolean,
+): Boolean = handoffRequested || tunnelActive || sessionActive
 
 /**
  * Wires the complete wired or wireless CarPlay path: MFi coprocessor discovery, iPhone bring-up,
@@ -258,6 +265,10 @@ class CarPlayController(
                 maybeCompleteWirelessHandoff()
             }
             uiListener?.onCommand(session, type, params)
+        }
+
+        override fun onDebugLog(message: String) {
+            debugLog(message)
         }
     }
 
@@ -716,7 +727,7 @@ class CarPlayController(
             val socket = device
                     .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
                     .also { bluetoothSocket = it }
-            socket.connect()
+            connectBluetoothSocket(socket, device.address)
             debugLog("wireless RFCOMM connected address=${device.address}")
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
@@ -737,6 +748,11 @@ class CarPlayController(
                 passphrase = hotspotInfo.passphrase,
                 channel = hotspotInfo.channel,
                 security = hotspotInfo.security,
+                ipAddresses = listOf(hostAddressText),
+                airPlayPort = airPlayConfig.port,
+                deviceIdentifier = deviceIdentifier,
+                publicKey = identity.publicKeyHex,
+                sourceVersion = airPlayConfig.sourceVersion,
             )
             wirelessIdentification = identification
             wirelessAirPlayEndpoint = endpoint
@@ -764,14 +780,26 @@ class CarPlayController(
                         "wireless RFCOMM EOF: iap2State=${result.stage} " +
                             "wirelessCarPlayConnecting=${result.wirelessCarPlayConnectingSeen} " +
                             "transportIdentifier=${result.transportNotificationSeen} " +
+                            "carPlayStartSessions=${result.carPlayStartSessionsSent} " +
                             "postTransportConfigs=${result.postTransportWiFiConfigurationsSent} " +
                             "handoffRequested=${wirelessHandoffRequested.get()} " +
                             "tunnelReady=${wirelessTunnelReady.get()} " +
                             "wirelessActive=${wirelessActiveReported.get()}",
                     )
                     if (!wirelessActiveReported.get()) {
-                        throw IOException(
-                            "Wireless CarPlay control channel closed before tunnel iAP2 ready",
+                        val handoffInProgress = isWirelessHandoffInProgress(
+                            handoffRequested = wirelessHandoffRequested.get(),
+                            tunnelActive = wirelessTunnelChannel != null,
+                            sessionActive = activeSession != null,
+                        )
+                        if (!handoffInProgress) {
+                            throw IOException(
+                                "Wireless CarPlay control channel closed before tunnel iAP2 ready",
+                            )
+                        }
+                        debugLog(
+                            "wireless Bluetooth bootstrap closed during handoff; " +
+                                "keeping the Wi-Fi AirPlay tunnel alive",
                         )
                     }
                 }
@@ -802,7 +830,7 @@ class CarPlayController(
         val mfi = mfiSession?.client ?: return false
         debugLog("wireless type-130 tunnel data stream accepted")
         val channel = try {
-            Iap2CsmChannel.openWireless(stream)
+            Iap2CsmChannel.openTunnel(stream)
         } catch (error: Throwable) {
             debugLog("Could not open the tunneled iAP2 link", error)
             return false
@@ -1251,6 +1279,9 @@ class CarPlayController(
                 ssid = config.manualHotspotSsid
                     ?: throw IOException("Manual hotspot SSID is not configured"),
                 passphrase = config.manualHotspotPassphrase.orEmpty(),
+                band = config.manualHotspotBand,
+                channel = config.manualHotspotChannel,
+                security = config.manualHotspotSecurity,
             )
         }
         hotspot = manager
@@ -1313,6 +1344,72 @@ class CarPlayController(
         throw IOException(
             "No unambiguous bonded iPhone found; pair one iPhone and retry",
         )
+    }
+
+    private fun connectBluetoothSocket(socket: BluetoothSocket, address: String) {
+        val result = AtomicReference<Throwable?>()
+        val connected = CountDownLatch(1)
+        Thread(
+            {
+                try {
+                    socket.connect()
+                } catch (error: Throwable) {
+                    result.set(error)
+                } finally {
+                    connected.countDown()
+                }
+            },
+            "wireless-rfcomm-connect",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+        val completed = try {
+            connected.await(RFCOMM_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            runCatching { socket.close() }
+            throw IOException("Interrupted while connecting RFCOMM to $address", error)
+        }
+        if (!completed) {
+            debugLog(
+                "wireless RFCOMM connect timed out after " +
+                    "${RFCOMM_CONNECT_TIMEOUT_MILLIS}ms address=$address",
+            )
+            runCatching { socket.close() }
+            throw IOException(
+                "Timed out after ${RFCOMM_CONNECT_TIMEOUT_MILLIS}ms connecting RFCOMM to $address",
+            )
+        }
+        when (val failure = result.get()) {
+            null -> Unit
+            is IOException -> throw failure
+            else -> throw IOException("Could not connect RFCOMM to $address", failure)
+        }
+    }
+
+    private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
+        media.setIapTunnelHandler(null)
+        val activeTunnel = wirelessTunnelChannel
+        wirelessTunnelChannel = null
+        if (activeTunnel != null) closeBestEffort("tunneled iAP2 link") { activeTunnel.close() }
+
+        closeBluetoothBootstrapTransport()
+
+        val activeBonjour = bonjour
+        bonjour = null
+        if (activeBonjour != null) closeBestEffort("Bonjour") { activeBonjour.close() }
+
+        val activeHotspot = hotspot
+        hotspot = null
+        if (activeHotspot != null) closeBestEffort("wireless hotspot") { activeHotspot.close() }
+        wirelessIdentification = null
+        wirelessAirPlayEndpoint = null
+        wirelessHandoffRequested.set(false)
+        wirelessTunnelReady.set(false)
+        wirelessActiveReported.set(false)
+
+        if (service != null) closeBestEffort("AirPlay service") { service.detach() }
     }
 
     private fun isBluetoothDeviceConnected(device: BluetoothDevice): Boolean = try {
@@ -1384,30 +1481,6 @@ class CarPlayController(
             throw IOException("LocalOnlyHotspot host address is unavailable")
         }
         return text
-    }
-
-    private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
-        media.setIapTunnelHandler(null)
-        val activeTunnel = wirelessTunnelChannel
-        wirelessTunnelChannel = null
-        if (activeTunnel != null) closeBestEffort("tunneled iAP2 link") { activeTunnel.close() }
-
-        closeBluetoothBootstrapTransport()
-
-        val activeBonjour = bonjour
-        bonjour = null
-        if (activeBonjour != null) closeBestEffort("Bonjour") { activeBonjour.close() }
-
-        val activeHotspot = hotspot
-        hotspot = null
-        if (activeHotspot != null) closeBestEffort("wireless hotspot") { activeHotspot.close() }
-        wirelessIdentification = null
-        wirelessAirPlayEndpoint = null
-        wirelessHandoffRequested.set(false)
-        wirelessTunnelReady.set(false)
-        wirelessActiveReported.set(false)
-
-        if (service != null) closeBestEffort("AirPlay service") { service.detach() }
     }
 
     private fun closeBestEffort(name: String, close: () -> Unit) {
@@ -1628,6 +1701,7 @@ class CarPlayController(
         private const val PERMISSION_POLL_TIMEOUT_MILLIS = 120_000L
         private const val DEVICE_AVAILABILITY_POLL_INTERVAL_MILLIS = 2_000L
         private const val WIRELESS_HANDOFF_TIMEOUT_MILLIS = 45_000L
+        private const val RFCOMM_CONNECT_TIMEOUT_MILLIS = 15_000L
         private const val MAXIMUM_REENUMERATION_ATTEMPTS = 2
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
         private const val ADAPTER_ADDRESS_PLACEHOLDER = "02:00:00:00:00:00"

@@ -47,6 +47,61 @@ class SafeAreaTest {
     }
 
     @Test
+    fun safeAreaDimensionsAreAlignedToEvenPixelsAfterActivityMapping() {
+        val insets = AirPlaySafeArea.toInsets(
+            mapping = SafeAreaRect(left = 0, top = 0, right = 1920, bottom = 975),
+            activityWidthPixels = 1920,
+            activityHeightPixels = 1080,
+            displayWidthPixels = 1920,
+            displayHeightPixels = 1080,
+        )
+
+        assertEquals(AirPlayInsets(bottom = 104), insets)
+    }
+
+    @Test
+    fun alreadyEvenSafeAreaDimensionsAreUnchanged() {
+        val insets = AirPlaySafeArea.toInsets(
+            mapping = SafeAreaRect(left = 34, top = 75, right = 734, bottom = 725),
+            activityWidthPixels = 768,
+            activityHeightPixels = 800,
+            displayWidthPixels = 768,
+            displayHeightPixels = 800,
+        )
+
+        assertEquals(AirPlayInsets(top = 75, bottom = 75, left = 34, right = 34), insets)
+    }
+
+    @Test
+    fun activity978MapsThroughEvenAlignedDisplayDimensions() {
+        val native = AirPlayDisplayConfig(widthPixels = 1920, heightPixels = 978)
+        val display = CarPlayDisplayScale.apply(native, 7)
+
+        val full = AirPlaySafeArea.toInsets(
+            mapping = null,
+            activityWidthPixels = 1920,
+            activityHeightPixels = 978,
+            displayWidthPixels = display.widthPixels,
+            displayHeightPixels = display.heightPixels,
+        )
+        val custom = AirPlaySafeArea.toInsets(
+            mapping = SafeAreaRect(left = 100, top = 50, right = 1800, bottom = 900),
+            activityWidthPixels = 1920,
+            activityHeightPixels = 978,
+            displayWidthPixels = display.widthPixels,
+            displayHeightPixels = display.heightPixels,
+        )
+
+        assertEquals(1344, display.widthPixels)
+        assertEquals(686, display.heightPixels)
+        assertEquals(AirPlayInsets(), full)
+        assertEquals(70, custom.left)
+        assertEquals(35, custom.top)
+        assertEquals(84, custom.right)
+        assertEquals(55, custom.bottom)
+    }
+
+    @Test
     fun editorCanScaleBetweenActivitySizesWithoutChangingRatios() {
         val activityRect = SafeAreaRect(1900, 1000, 2100, 1200)
 

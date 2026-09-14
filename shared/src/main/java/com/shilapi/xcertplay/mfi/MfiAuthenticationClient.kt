@@ -18,10 +18,14 @@ class MfiAuthenticationClient(
     }
 
     /** Returns the raw value advertised by register 0x02; no protocol-major policy is imposed. */
-    fun protocolMajor(): Int = readByte(PROTOCOL_MAJOR_REGISTER)
+    fun protocolMajor(): Int = synchronized(COPROCESSOR_LOCK) {
+        readByte(PROTOCOL_MAJOR_REGISTER)
+    }
 
     /** Reads the certificate length from 0x30 and its body through 128-byte register windows. */
-    fun readCertificate(maximumOutputLength: Int = DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH): ByteArray {
+    fun readCertificate(
+        maximumOutputLength: Int = DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH,
+    ): ByteArray = synchronized(COPROCESSOR_LOCK) {
         require(maximumOutputLength in 1..MAX_REGISTER_READ_BYTES) {
             "maximumOutputLength must be in 1..$MAX_REGISTER_READ_BYTES"
         }
@@ -40,7 +44,7 @@ class MfiAuthenticationClient(
             offset += count
             register += 1
         }
-        return certificate
+        certificate
     }
 
     /**
@@ -49,7 +53,7 @@ class MfiAuthenticationClient(
      * The protocol-major register intentionally does not participate in this sequence: LIVI's
      * implementation uses the same registers for every observed major version.
      */
-    fun signChallenge(challenge: ByteArray): ByteArray {
+    fun signChallenge(challenge: ByteArray): ByteArray = synchronized(COPROCESSOR_LOCK) {
         if (challenge.size !in MINIMUM_CHALLENGE_BYTES..MAXIMUM_CHALLENGE_BYTES) {
             throw MfiInvalidDataException(
                 "challenge must be $MINIMUM_CHALLENGE_BYTES..$MAXIMUM_CHALLENGE_BYTES bytes",
@@ -78,7 +82,7 @@ class MfiAuthenticationClient(
         if (length !in 1..MAX_REGISTER_READ_BYTES) {
             throw MfiInvalidDataException("Invalid signature length $length")
         }
-        return readRegister(RESPONSE_DATA_REGISTER, length)
+        readRegister(RESPONSE_DATA_REGISTER, length)
     }
 
     private fun bestEffortErrorCode(): Int? = try {
@@ -182,6 +186,7 @@ class MfiAuthenticationClient(
     }
 
     companion object {
+        private val COPROCESSOR_LOCK = Any()
         const val DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH = 65_525
         private const val MAX_REGISTER_READ_BYTES = 65_525
         private const val BYTE_MASK = 0xff

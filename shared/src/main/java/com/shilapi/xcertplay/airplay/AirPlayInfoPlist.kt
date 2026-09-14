@@ -144,11 +144,15 @@ object AirPlayInfoPlist {
     }
 
     private fun displayEntry(display: AirPlayDisplayConfig, type: Int, uuid: String): Map<String, Any?> {
-        val widthPhysical = AirPlayDisplaySettings.sanitizeWidthPhysicalMm(
+        val widthPhysical = AirPlayDisplaySettings.sanitizeReportedPhysicalMm(
             display.widthPhysicalMm ?: AirPlayDisplaySettings.DEFAULT_WIDTH_PHYSICAL_MM,
         )
-        val heightPhysical = display.heightPhysicalMm
-            ?: maxOf(1, Math.round(widthPhysical * display.heightPixels.toDouble() / display.widthPixels).toInt())
+        val heightPhysical = AirPlayDisplaySettings.sanitizeReportedPhysicalMm(
+            display.heightPhysicalMm
+                ?: Math.round(
+                    widthPhysical * display.heightPixels.toDouble() / display.widthPixels,
+                ).toInt(),
+        )
         val fps = AirPlayDisplaySettings.sanitizeFps(display.fps)
 
         val entry = linkedMapOf<String, Any?>(

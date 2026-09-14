@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
 import java.io.InputStream
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -17,35 +18,78 @@ import java.util.concurrent.atomic.AtomicLong
  * The TCP stream is NetSocketChaCha20Poly1305 framed, then carries APTransportPackage records.
  * iAP2 bodies (messageType "comm") are emitted verbatim for the wired iAP2 relay.
  */
-class IapTunnel(private val readKey: ByteArray) : Closeable {
+class IapTunnel(
+    private val readKey: ByteArray,
+    bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
+) : Closeable {
     interface Listener {
+        fun onOpen(remoteAddress: String?) {}
         fun onIap(bytes: ByteArray) {}
+        fun onDebug(message: String) {}
         fun onClosed(cause: Throwable?) {}
     }
 
     private val closed = AtomicBoolean(false)
     private val readCounter = AtomicLong(0)
-    private var server: ServerSocket? = null
+    private val bindAddress =
+        if (bindAddress is Inet4Address) InetAddress.getByName("0.0.0.0") else bindAddress
+    private val servers = mutableListOf<ServerSocket>()
     private var socket: Socket? = null
-    private var thread: Thread? = null
+    private val threads = mutableListOf<Thread>()
     private val peerConnected = CountDownLatch(1)
     @Volatile private var listener: Listener = object : Listener {}
 
     fun listen(listener: Listener): Int {
         this.listener = listener
-        val bound = ServerSocket()
-        bound.reuseAddress = true
-        bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
-        server = bound
-        thread = Thread({ accept(bound) }, "airplay-iap-tunnel").apply { isDaemon = true; start() }
+        val bound = bindAny()
+        servers += bound
+        listener.onDebug("AirPlay iAP tunnel listener bound=${bound.localSocketAddress}")
+        val secondaryAddress = if (bindAddress is java.net.Inet6Address) {
+            InetAddress.getByName("0.0.0.0")
+        } else {
+            InetAddress.getByName("::")
+        }
+        val secondary = ServerSocket()
+        runCatching {
+            secondary.apply {
+                reuseAddress = true
+                bind(InetSocketAddress(secondaryAddress, bound.localPort))
+            }
+        }.onSuccess { secondary ->
+            servers += secondary
+            listener.onDebug(
+                "AirPlay iAP tunnel secondary listener bound=" +
+                    "${secondary.localSocketAddress}",
+            )
+        }.onFailure { error ->
+            safeClose(secondary)
+            listener.onDebug(
+                "AirPlay iAP tunnel secondary listener failed address=" +
+                    "$secondaryAddress port=${bound.localPort}: ${error.message}",
+            )
+        }
+        servers.forEach { server ->
+            threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {
+                isDaemon = true
+                start()
+            }
+        }
         return bound.localPort
     }
+
+    private fun bindAny(): ServerSocket =
+        ServerSocket().apply {
+            reuseAddress = true
+            bind(InetSocketAddress(bindAddress, 0))
+        }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         safeClose(socket)
-        safeClose(server)
-        thread?.interrupt()
+        servers.toList().forEach(::safeClose)
+        servers.clear()
+        threads.toList().forEach(Thread::interrupt)
+        threads.clear()
         peerConnected.countDown()
     }
 
@@ -61,13 +105,26 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
     }
 
     private fun accept(bound: ServerSocket) {
-        try {
-            val accepted = bound.accept()
+        listener.onDebug(
+            "AirPlay iAP tunnel accepting local=${bound.localSocketAddress}",
+        )
+        while (!closed.get()) {
+            val accepted = try {
+                bound.accept()
+            } catch (error: Exception) {
+                if (!closed.get()) listener.onClosed(error)
+                return
+            }
+            if (closed.get()) {
+                safeClose(accepted)
+                return
+            }
+            accepted.setSoLinger(true, 0)
             socket = accepted
+            readCounter.set(0)
             peerConnected.countDown()
+            listener.onOpen(accepted.remoteSocketAddress?.toString())
             run(accepted)
-        } catch (error: Exception) {
-            if (!closed.get()) listener.onClosed(error)
         }
     }
 
@@ -75,12 +132,20 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
         var ciphertext = ByteArray(0)
         var plaintext = ByteArray(0)
         var failure: Throwable? = null
+        var announcedData = false
         try {
             val input = sock.getInputStream()
             val buffer = ByteArray(READ_CHUNK_BYTES)
             while (!closed.get()) {
                 val read = input.read(buffer)
-                if (read < 0) break
+                if (read < 0) {
+                    listener.onDebug("AirPlay iAP tunnel peer EOF")
+                    break
+                }
+                if (!announcedData) {
+                    announcedData = true
+                    listener.onDebug("AirPlay iAP tunnel received data")
+                }
                 ciphertext += buffer.copyOf(read)
                 val decrypted = decryptFrames(ciphertext)
                 plaintext += decrypted.first
@@ -92,7 +157,7 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
         } finally {
             if (socket === sock) socket = null
             safeClose(sock)
-            if (!closed.get()) listener.onClosed(failure)
+            if (!closed.get() && failure != null) listener.onClosed(failure)
         }
     }
 
@@ -123,6 +188,9 @@ class IapTunnel(private val readKey: ByteArray) : Closeable {
             if (buffer.size - offset < size) break
             val messageType = readU32Be(buffer, offset + MESSAGE_TYPE_OFFSET)
             if (messageType == MSG_TYPE_COMM) {
+                listener.onDebug(
+                    "AirPlay iAP tunnel package type=comm body=${size - PACKAGE_HEADER_LEN}",
+                )
                 listener.onIap(buffer.copyOfRange(offset + PACKAGE_HEADER_LEN, offset + size))
             }
             offset += size

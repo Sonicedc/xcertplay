@@ -257,9 +257,7 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                         if (wireless == null) {
                             sentMessages
                         } else {
-                            sentMessages.filterNot {
-                                it == POWER_SOURCE_UPDATE || it == CARPLAY_START_SESSION
-                            }.toIntArray() +
+                            sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray() +
                                 ACCESSORY_WIFI_CONFIGURATION_INFORMATION
                         },
                     ),
@@ -270,7 +268,7 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
                         if (wireless == null) {
                             receivedMessages
                         } else {
-                            receivedMessages.filterNot { it == CARPLAY_AVAILABILITY }.toIntArray() +
+                            receivedMessages +
                                 WIRELESS_PHONE_MESSAGES
                         },
                     ),
