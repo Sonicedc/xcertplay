@@ -23,7 +23,7 @@
         android:name="android.hardware.usb.host"
         android:required="false" />
 
-    <application>
+    <application android:usesCleartextTraffic="true">
         <!-- Minimum Car API level -->
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"

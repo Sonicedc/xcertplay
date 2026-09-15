@@ -1,6 +1,6 @@
 package com.shilapi.xcertplay.airplay
 
-import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -14,14 +14,14 @@ import javax.crypto.spec.SecretKeySpec
  * coprocessor signature over the two public keys, AES-128-CTR encrypted under a key derived from
  * the shared secret. It runs over the already-encrypted control channel.
  *
- * [MfiAuthenticationClient] performs blocking I2C work and must be called off the main thread.
+ * [MfiAuthenticator] performs blocking I/O and must be called off the main thread.
  */
 object MfiSapAuthSetup {
     private const val VERSION = 0x01
     private const val PUBLIC_KEY_BYTES = 32
 
     /** Returns the raw binary response, or null when the request is malformed. */
-    fun handle(body: ByteArray, mfi: MfiAuthenticationClient): ByteArray? {
+    fun handle(body: ByteArray, mfi: MfiAuthenticator): ByteArray? {
         if (body.size != 1 + PUBLIC_KEY_BYTES || body[0].toInt() != VERSION) return null
         val peerPublicKey = body.copyOfRange(1, body.size)
 

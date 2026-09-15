@@ -27,7 +27,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
-import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.RemoteMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
@@ -394,25 +394,50 @@ class CarPlayController(
         availabilityPollGeneration.incrementAndGet()
         phase = Phase.MFI
         onStatus(CarPlayStatus.DiscoveringMfi)
-        debugLog(
-            if (config.ch341Devices.isNotEmpty()) {
-                "mfi discovery backend=CH341 devices=${config.ch341Devices}"
-            } else {
-                "mfi discovery backend=Linux I2C path=${config.linuxI2cPath}"
-            },
-        )
-        if (config.ch341Devices.isNotEmpty()) {
-            val host = ch341Host ?: Ch341UsbHost(
-                appContext,
-                usbManager,
-                Ch341DeviceMatcher(config.ch341Devices),
-            ).also {
-                ch341Host = it
-                ch341PermissionCloseable = it.registerPermissionReceiver(::onCh341Permission)
+        when (config.mfiTarget) {
+            MfiTarget.USB_CH341 -> {
+                debugLog("mfi discovery backend=CH341 devices=${config.ch341Devices}")
+                val host = ch341Host ?: Ch341UsbHost(
+                    appContext,
+                    usbManager,
+                    Ch341DeviceMatcher(config.ch341Devices),
+                ).also {
+                    ch341Host = it
+                    ch341PermissionCloseable = it.registerPermissionReceiver(::onCh341Permission)
+                }
+                checkCh341Mfi(host)
             }
-            checkCh341Mfi(host)
-        } else {
-            openLinuxMfi()
+            MfiTarget.I2C -> {
+                debugLog("mfi discovery backend=Linux I2C path=${config.linuxI2cPath}")
+                openLinuxMfi()
+            }
+            MfiTarget.REMOTE -> {
+                debugLog("mfi discovery backend=Remote server=${config.remoteMfiServer.orEmpty()}")
+                openRemoteMfi()
+            }
+        }
+    }
+
+    private fun openRemoteMfi() {
+        executor.execute {
+            try {
+                val client = RemoteMfiAuthenticationClient(
+                    serverAddress = checkNotNull(config.remoteMfiServer),
+                    token = config.remoteMfiToken,
+                )
+                client.reset()
+                val protocolMajor = client.protocolMajor()
+                if (closed || phase != Phase.MFI) return@execute
+                mfiSession = MfiSession(client, null)
+                debugLog(
+                    "mfi remote service ready server=${config.remoteMfiServer} " +
+                        "protocolMajor=$protocolMajor",
+                )
+                onStatus(CarPlayStatus.MfiReady)
+                startPhone()
+            } catch (error: Throwable) {
+                fail(error)
+            }
         }
     }
 
@@ -557,7 +582,11 @@ class CarPlayController(
         if (closed || phase != Phase.MFI) return
         onStatus(CarPlayStatus.WaitingForMfi)
         scheduleAvailabilityPoll(Phase.MFI) {
-            ch341Host?.let(::checkCh341Mfi) ?: openLinuxMfi()
+            when (config.mfiTarget) {
+                MfiTarget.USB_CH341 -> ch341Host?.let(::checkCh341Mfi)
+                MfiTarget.I2C -> openLinuxMfi()
+                MfiTarget.REMOTE -> Unit
+            }
         }
     }
 
@@ -1643,13 +1672,13 @@ class CarPlayController(
 
     private fun CarPlayStatus.debugLogMessage(): String = when (this) {
         CarPlayStatus.DiscoveringMfi ->
-            "STEP mfi/scan: searching for the MFi coprocessor"
+            "STEP mfi/start: preparing the configured MFi authentication provider"
         CarPlayStatus.WaitingForMfi ->
             "STEP mfi/wait: MFi coprocessor not present; polling"
         CarPlayStatus.RequestingMfiPermission ->
             "STEP mfi/permission: requesting CH341 USB access"
         CarPlayStatus.MfiReady ->
-            "STEP mfi/ready: MFi coprocessor session is open"
+            "STEP mfi/ready: MFi authentication provider is ready"
         CarPlayStatus.StartingHotspot ->
             "STEP wifi/ap: starting the wireless CarPlay access point"
         is CarPlayStatus.HotspotReady ->

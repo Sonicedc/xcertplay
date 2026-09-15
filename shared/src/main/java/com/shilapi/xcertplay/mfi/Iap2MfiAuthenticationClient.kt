@@ -7,7 +7,7 @@ import com.shilapi.xcertplay.transport.Iap2CsmParameters
 
 /** Runs LIVI's minimal iAP2 CSM MFi exchange without taking ownership of [Iap2CsmChannel]. */
 class Iap2MfiAuthenticationClient(
-    private val authentication: MfiAuthenticationClient,
+    private val authentication: MfiAuthenticator,
     private val maximumCertificateLength: Int = MfiAuthenticationClient.DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH,
 ) {
     init {

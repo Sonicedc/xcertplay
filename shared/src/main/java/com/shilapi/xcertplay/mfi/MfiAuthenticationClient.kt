@@ -3,6 +3,17 @@ package com.shilapi.xcertplay.mfi
 import com.shilapi.xcertplay.transport.I2cTransport
 import com.shilapi.xcertplay.transport.I2cTransportException
 
+/** Common certificate/signing contract implemented by local coprocessors and remote services. */
+interface MfiAuthenticator {
+    fun protocolMajor(): Int
+
+    fun readCertificate(
+        maximumOutputLength: Int = MfiAuthenticationClient.DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH,
+    ): ByteArray
+
+    fun signChallenge(challenge: ByteArray): ByteArray
+}
+
 /**
  * Blocking register client for one MFi authentication coprocessor.
  *
@@ -12,19 +23,19 @@ import com.shilapi.xcertplay.transport.I2cTransportException
 class MfiAuthenticationClient(
     private val transport: I2cTransport,
     val address7Bit: Int,
-) {
+) : MfiAuthenticator {
     init {
         require(address7Bit in 0x00..0x7f) { "address7Bit must be in 0x00..0x7f" }
     }
 
     /** Returns the raw value advertised by register 0x02; no protocol-major policy is imposed. */
-    fun protocolMajor(): Int = synchronized(COPROCESSOR_LOCK) {
+    override fun protocolMajor(): Int = synchronized(COPROCESSOR_LOCK) {
         readByte(PROTOCOL_MAJOR_REGISTER)
     }
 
     /** Reads the certificate length from 0x30 and its body through 128-byte register windows. */
-    fun readCertificate(
-        maximumOutputLength: Int = DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH,
+    override fun readCertificate(
+        maximumOutputLength: Int,
     ): ByteArray = synchronized(COPROCESSOR_LOCK) {
         require(maximumOutputLength in 1..MAX_REGISTER_READ_BYTES) {
             "maximumOutputLength must be in 1..$MAX_REGISTER_READ_BYTES"
@@ -53,7 +64,7 @@ class MfiAuthenticationClient(
      * The protocol-major register intentionally does not participate in this sequence: LIVI's
      * implementation uses the same registers for every observed major version.
      */
-    fun signChallenge(challenge: ByteArray): ByteArray = synchronized(COPROCESSOR_LOCK) {
+    override fun signChallenge(challenge: ByteArray): ByteArray = synchronized(COPROCESSOR_LOCK) {
         if (challenge.size !in MINIMUM_CHALLENGE_BYTES..MAXIMUM_CHALLENGE_BYTES) {
             throw MfiInvalidDataException(
                 "challenge must be $MINIMUM_CHALLENGE_BYTES..$MAXIMUM_CHALLENGE_BYTES bytes",
