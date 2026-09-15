@@ -9,7 +9,7 @@
 ## Features
 
 - 面向 Android 和 Android Automotive OS 的 CarPlay 主机应用。
-- 支持 CH341 桥接 MFI 芯片和原生 `/dev/i2c-N` 设备连接的 MFI芯片。
+- 支持 CH341 桥接 MFI 芯片、原生 `/dev/i2c-N` 设备连接的 MFI芯片、Remote MFI 认证（API见下）。
 - 支持 CarPlay 有线或无线连接。
 - 支持触发 CarPlay Ultra （未测试/未完成的协议栈，但是确实可以在 iPhone 上触发 CarPlay Ultra 的提示）。
 - 支持语音、导航、音乐多通道音频输出并 mapping 至 Android 的对应通道。
@@ -33,6 +33,22 @@
 | `mobile/` | 使用共享 CarPlay 主机界面的 Android 应用。 |
 | `automotive/` | 使用共享主机界面并支持高级音频通道映射的 Android Automotive OS 应用。 |
 | `shared/` | Car App Library 代码，以及 CH341、I2C、MFi、iPhone、iAP2、NCM、VPN、AirPlay 和媒体实现。 |
+
+## Remote MFI 功能
+
+Remote MFi 客户端把远程服务当作一块 MFi 芯片远程调用，抑或是采用 BAA 认证，通过远程进行认证免去了本地连接 MFI 芯片进行认证的流程。
+
+### 端点
+
+| Method | Path | 用途 | Request body | Success response | 失败 response |
+| --- | --- | --- | --- | --- | --- |
+| `GET` | `/mfi/certificate` | 获取 MFI 芯片版本、证书类型和证书内容，客户端首次调用后缓存 | 无 | 证书 JSON | `{"detail":"..."}` |
+| `POST` | `/mfi/sign` | 对 challenge 签名 | `{"challenge":"...","requestId":"..."}` | `{"signature":"..."}` | `{"detail":"..."}` |
+| `POST` | `/mfi/reset` | 请求重置远程 MFI 芯片 | `{}` | `{"detail":""}` | `{"detail":"..."}` |
+
+（可选）采用标准 Bearer Authentication 进行验证。
+
+**当前仅测试了 BAA Authentication**
 
 ## 环境要求
 
@@ -67,6 +83,7 @@ $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
 ## 致谢
 
 感谢 [LIVI](https://github.com/f-io/LIVI) 项目为本项目提供了重要参考。
+感谢 [showcase](https://github.com/amineross/showcase) 项目为本项目的 BAA 认证提供重要参考。
 
 ## 许可证
 
