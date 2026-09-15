@@ -2,6 +2,8 @@ package com.shilapi.xcertplay.mfi
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import com.shilapi.xcertplay.transport.Iap2CsmParameter
+import com.shilapi.xcertplay.transport.Iap2CsmParameters
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -112,6 +114,55 @@ class RemoteMfiAuthenticationClientTest {
     }
 
     @Test
+    fun loadsBaaPackageAndBuildsShowcaseIap2Payload() {
+        val leaf = ByteArray(40) { (0x10 + it).toByte() }
+        val intermediate = ByteArray(60) { (0x80 + it).toByte() }
+        val packageBytes = u32(leaf.size) + u32(intermediate.size) + leaf + intermediate
+
+        server.createContext("/mfi/certificate") { exchange ->
+            val encoded = Base64.getEncoder().encodeToString(packageBytes)
+            val digest = MessageDigest.getInstance("SHA-256").digest(packageBytes).toHex()
+            exchange.respond(
+                200,
+                "{\"type\":\"baa\",\"protocolMajor\":3,\"certificate\":\"$encoded\"," +
+                    "\"certificateSha256\":\"$digest\"}",
+            )
+        }
+
+        val client = RemoteMfiAuthenticationClient(serverAddress())
+        assertEquals(MfiCertificateType.BAA, client.certificateType)
+        assertArrayEquals(
+            Iap2CsmParameters.encode(
+                listOf(
+                    Iap2CsmParameter(0, leaf),
+                    Iap2CsmParameter(1, byteArrayOf(1)),
+                    Iap2CsmParameter(2, intermediate),
+                ),
+            ),
+            client.readCertificate(),
+        )
+        val certificates = client.baaCertificates()
+        assertArrayEquals(leaf, certificates.leaf)
+        assertArrayEquals(intermediate, certificates.intermediate)
+    }
+
+    @Test
+    fun rejectsUnknownCertificateType() {
+        server.createContext("/mfi/certificate") { exchange ->
+            exchange.respond(
+                200,
+                "{\"type\":\"unknown\",\"protocolMajor\":3,\"certificate\":\"AQID\"," +
+                    "\"certificateSha256\":\"${"00".repeat(32)}\"}",
+            )
+        }
+
+        val error = assertThrows(MfiInvalidDataException::class.java) {
+            RemoteMfiAuthenticationClient(serverAddress()).readCertificate()
+        }
+        assertEquals("Unsupported remote MFI certificate type 'unknown'", error.message)
+    }
+
+    @Test
     fun resetSurfacesHttp500DetailWithoutRetrying() {
         val requests = AtomicInteger()
         server.createContext("/mfi/reset") { exchange ->
@@ -141,4 +192,11 @@ class RemoteMfiAuthenticationClientTest {
         use { String(it.readBytes(), StandardCharsets.UTF_8) }
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private fun u32(value: Int): ByteArray = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
 }

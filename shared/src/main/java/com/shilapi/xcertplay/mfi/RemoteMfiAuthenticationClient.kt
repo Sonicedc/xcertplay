@@ -8,6 +8,8 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
+import com.shilapi.xcertplay.transport.Iap2CsmParameter
+import com.shilapi.xcertplay.transport.Iap2CsmParameters
 
 /** Blocking HTTP implementation of the MFI certificate and challenge-signing operations. */
 class RemoteMfiAuthenticationClient(
@@ -18,8 +20,11 @@ class RemoteMfiAuthenticationClient(
     private val maximumAttempts: Int = DEFAULT_MAXIMUM_ATTEMPTS,
 ) : MfiAuthenticator {
     private data class CertificateInfo(
+        val type: MfiCertificateType,
         val protocolMajor: Int,
-        val certificate: ByteArray,
+        val wireCertificate: ByteArray,
+        val iap2Certificate: ByteArray,
+        val baaCertificates: BaaCertificatePair?,
     )
 
     private data class HttpResponse(
@@ -58,17 +63,27 @@ class RemoteMfiAuthenticationClient(
         loadCertificateInfo().protocolMajor
     }
 
+    override val certificateType: MfiCertificateType
+        get() = synchronized(operationLock) {
+            loadCertificateInfo().type
+        }
+
     override fun readCertificate(maximumOutputLength: Int): ByteArray = synchronized(operationLock) {
         require(maximumOutputLength in 1..MAXIMUM_RESPONSE_BYTES) {
             "maximumOutputLength must be in 1..$MAXIMUM_RESPONSE_BYTES"
         }
-        val certificate = loadCertificateInfo().certificate
+        val certificate = loadCertificateInfo().iap2Certificate
         if (certificate.size !in 1..maximumOutputLength) {
             throw MfiInvalidDataException(
                 "Remote certificate length ${certificate.size} is outside 1..$maximumOutputLength",
             )
         }
         certificate.copyOf()
+    }
+
+    override fun baaCertificates(): BaaCertificatePair = synchronized(operationLock) {
+        loadCertificateInfo().baaCertificates
+            ?: throw MfiInvalidDataException("Remote MFI service is not using BAA certificates")
     }
 
     override fun signChallenge(challenge: ByteArray): ByteArray = synchronized(operationLock) {
@@ -104,6 +119,12 @@ class RemoteMfiAuthenticationClient(
         if (protocolMajor !in 0..0xff) {
             throw MfiInvalidDataException("Invalid remote MFI protocol major $protocolMajor")
         }
+        val typeText = RemoteMfiJson.optionalString(response, "type") ?: "mfi"
+        val type = when (typeText.lowercase()) {
+            "mfi" -> MfiCertificateType.MFI
+            "baa" -> MfiCertificateType.BAA
+            else -> throw MfiInvalidDataException("Unsupported remote MFI certificate type '$typeText'")
+        }
         val certificate = decodeBase64(
             RemoteMfiJson.string(response, "certificate"),
             "certificate",
@@ -116,8 +137,56 @@ class RemoteMfiAuthenticationClient(
         if (!MessageDigest.isEqual(expectedDigest, actualDigest)) {
             throw MfiInvalidDataException("Remote certificate SHA-256 does not match certificateSha256")
         }
-        return CertificateInfo(protocolMajor, certificate.copyOf()).also { certificateInfo = it }
+        val baaCertificates = if (type == MfiCertificateType.BAA) {
+            parseBaaCertificatePackage(certificate)
+        } else {
+            null
+        }
+        val iap2Certificate = if (baaCertificates != null) {
+            Iap2CsmParameters.encode(
+                listOf(
+                    Iap2CsmParameter(0, baaCertificates.leaf),
+                    Iap2CsmParameter(1, byteArrayOf(1)),
+                    Iap2CsmParameter(2, baaCertificates.intermediate),
+                ),
+            )
+        } else {
+            certificate.copyOf()
+        }
+        if (iap2Certificate.size > MAXIMUM_RESPONSE_BYTES) {
+            throw MfiInvalidDataException("Remote iAP2 certificate payload is too large")
+        }
+        return CertificateInfo(
+            type = type,
+            protocolMajor = protocolMajor,
+            wireCertificate = certificate.copyOf(),
+            iap2Certificate = iap2Certificate,
+            baaCertificates = baaCertificates,
+        ).also { certificateInfo = it }
     }
+
+    private fun parseBaaCertificatePackage(encoded: ByteArray): BaaCertificatePair {
+        if (encoded.size < BAA_PACKAGE_HEADER_BYTES) {
+            throw MfiInvalidDataException("BAA certificate package is too short")
+        }
+        val leafLength = readU32(encoded, 0)
+        val intermediateLength = readU32(encoded, 4)
+        if (leafLength <= 0 || intermediateLength <= 0 ||
+            BAA_PACKAGE_HEADER_BYTES + leafLength + intermediateLength != encoded.size) {
+            throw MfiInvalidDataException("BAA certificate package has invalid lengths")
+        }
+        val leafEnd = BAA_PACKAGE_HEADER_BYTES + leafLength
+        return BaaCertificatePair(
+            leaf = encoded.copyOfRange(BAA_PACKAGE_HEADER_BYTES, leafEnd),
+            intermediate = encoded.copyOfRange(leafEnd, encoded.size),
+        )
+    }
+
+    private fun readU32(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xff) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 8) or
+            (bytes[offset + 3].toInt() and 0xff)
 
     private fun request(
         method: String,
@@ -223,6 +292,7 @@ class RemoteMfiAuthenticationClient(
         private const val MAXIMUM_HTTP_BODY_BYTES = 2 * 1024 * 1024
         private const val SHA256_BYTES = 32
         private const val SHA256_HEX_LENGTH = SHA256_BYTES * 2
+        private const val BAA_PACKAGE_HEADER_BYTES = 8
     }
 }
 
