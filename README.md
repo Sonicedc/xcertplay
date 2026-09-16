@@ -23,6 +23,15 @@ controller, and supports both wired and wireless CarPlay connections.
 - Vehicle head-unit location reporting.
 - Android 9 (API 28) support.
 
+## Usage
+
+1. Pair your iPhone with the head unit via Bluetooth.
+2. In the app, swipe down with three fingers to open the Settings page.
+3. Make sure all the settings are configured as desired.
+4. Scroll to the bottom and select `Save & Reconnect`.
+5. Connect your MFi chip using the method you selected.
+6. Wait for the connection to complete, then enjoy.
+
 ## Current progress
 
 It works 👍. It has been tested on car head units and phones. If you encounter

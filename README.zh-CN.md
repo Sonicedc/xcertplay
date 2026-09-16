@@ -17,6 +17,15 @@
 - 支持车机位置回传。
 - 支持 Android 9 (API 28) 。
 
+## 使用方法
+
+1. 通过蓝牙将 iPhone 与车机配对。
+2. 在应用中用三指向下滑动，打开设置页面。
+3. 确认所有设置均已按需配置。
+4. 滑动到底部，选择 `Save & Reconnect`。
+5. 按照你选择的方式连接 MFi 芯片。
+6. 等待连接完成，然后开始使用。
+
 ## 当前进度
 
 他运转👍，已在车机/手机平台测试，如果出现部分车机不适配的情况欢迎 issue （并附上你的 log ，位于 `/sdcard/Android/data/com.shilapi.xcertplay/files/logs/xcertplay.log`）
