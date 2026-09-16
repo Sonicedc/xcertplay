@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.orchestration
 
 import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.mfi.MfiDeviceScanner
 import com.shilapi.xcertplay.transport.I2cTransport
 import java.io.Closeable
@@ -13,7 +14,7 @@ internal class MfiCoprocessorNotFoundException(
 
 /** An opened MFi coprocessor client plus the handle that releases its backing transport. */
 class MfiSession(
-    val client: MfiAuthenticationClient,
+    val client: MfiAuthenticator,
     private val closeable: Closeable?,
 ) : Closeable {
     override fun close() {

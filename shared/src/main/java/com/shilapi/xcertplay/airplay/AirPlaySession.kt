@@ -1,7 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.util.Log
-import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -57,7 +57,7 @@ class AirPlaySession(
     private val config: AirPlayConfig,
     private val identity: AirPlayIdentity,
     private val pairings: PairingStore,
-    private val mfi: MfiAuthenticationClient?,
+    private val mfi: MfiAuthenticator?,
     private val listener: AirPlaySessionListener,
     private val media: AirPlayMediaHandler,
 ) : Closeable {

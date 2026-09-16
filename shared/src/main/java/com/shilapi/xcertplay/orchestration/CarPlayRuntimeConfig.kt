@@ -10,6 +10,12 @@ enum class CarPlayTransport {
     WIRELESS,
 }
 
+enum class MfiTarget {
+    USB_CH341,
+    I2C,
+    REMOTE,
+}
+
 enum class WirelessHotspotMode {
     WIFI_P2P,
     LOCAL_ONLY_HOTSPOT,
@@ -35,9 +41,12 @@ enum class ManualHotspotSecurity {
  */
 class CarPlayRuntimeConfig(
     val iphoneDevices: List<UsbDeviceId> = emptyList(),
+    val mfiTarget: MfiTarget = MfiTarget.USB_CH341,
     val ch341Devices: List<UsbDeviceId> = emptyList(),
     val ch341MfiResetGpio: Int? = null,
     val linuxI2cPath: String? = null,
+    val remoteMfiServer: String? = null,
+    val remoteMfiToken: String? = null,
     val hostMac: ByteArray = DEFAULT_HOST_MAC,
     val linkLocal: String = "fe80::2",
     val identification: Iap2IdentificationConfig,
@@ -64,11 +73,23 @@ class CarPlayRuntimeConfig(
         }
         require(label.isNotBlank()) { "label must not be blank" }
         require(hostName.isNotBlank()) { "hostName must not be blank" }
-        require(ch341Devices.isNotEmpty() || linuxI2cPath != null) {
-            "Either ch341Devices or linuxI2cPath must be configured for MFi I2C"
+        require(mfiTarget != MfiTarget.USB_CH341 || ch341Devices.isNotEmpty()) {
+            "CH341 devices must be configured for the USB/CH341 MFi target"
+        }
+        require(mfiTarget != MfiTarget.I2C || !linuxI2cPath.isNullOrBlank()) {
+            "A Linux I2C path must be configured for the I2C MFi target"
+        }
+        require(mfiTarget != MfiTarget.REMOTE || !remoteMfiServer.isNullOrBlank()) {
+            "A server address must be configured for the remote MFi target"
         }
         require(ch341MfiResetGpio == null || ch341MfiResetGpio in 0..5) {
             "CH341 MFi reset GPIO must be D0..D5"
+        }
+        require(remoteMfiServer?.contains('\u0000') != true) {
+            "Remote MFi server must not contain U+0000"
+        }
+        require(remoteMfiToken?.contains('\u0000') != true) {
+            "Remote MFi token must not contain U+0000"
         }
         if (wirelessHotspotMode == WirelessHotspotMode.MANUAL) {
             val ssid = manualHotspotSsid

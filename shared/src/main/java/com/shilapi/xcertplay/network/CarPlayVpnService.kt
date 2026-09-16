@@ -13,7 +13,7 @@ import com.shilapi.xcertplay.airplay.AirPlayMediaHandler
 import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
-import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.io.IOException
 import java.net.Inet6Address
@@ -45,7 +45,7 @@ class CarPlayVpnService : VpnService() {
         val config: AirPlayConfig,
         val identity: AirPlayIdentity,
         val pairings: PairingStore,
-        val mfi: MfiAuthenticationClient?,
+        val mfi: MfiAuthenticator?,
         val listener: AirPlaySessionListener,
         val media: AirPlayMediaHandler,
     )
@@ -70,7 +70,7 @@ class CarPlayVpnService : VpnService() {
         config: AirPlayConfig,
         identity: AirPlayIdentity,
         pairings: PairingStore,
-        mfi: MfiAuthenticationClient?,
+        mfi: MfiAuthenticator?,
         listener: AirPlaySessionListener,
         media: AirPlayMediaHandler,
     ): AttachResult {
@@ -124,7 +124,7 @@ class CarPlayVpnService : VpnService() {
         config: AirPlayConfig,
         identity: AirPlayIdentity,
         pairings: PairingStore,
-        mfi: MfiAuthenticationClient?,
+        mfi: MfiAuthenticator?,
         listener: AirPlaySessionListener,
         media: AirPlayMediaHandler,
     ): AttachResult {

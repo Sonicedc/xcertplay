@@ -12,7 +12,7 @@ controller, and supports both wired and wireless CarPlay connections.
 
 - CarPlay host applications for Android and Android Automotive OS.
 - Support for MFI chips connected through a CH341 bridge or native
-  `/dev/i2c-N` devices.
+  `/dev/i2c-N` devices, and Remote MFI authentication (see the API below).
 - Wired and wireless CarPlay connections.
 - CarPlay Ultra triggering (the protocol stack is untested/incomplete, but it
   can trigger the CarPlay Ultra prompt on an iPhone).
@@ -41,6 +41,24 @@ Waiting for the MFI chip adapter board to arrive...
 | `mobile/` | Standard Android target using the shared CarPlay host UI. |
 | `automotive/` | Android Automotive OS target with the shared host UI and advanced audio channel mapping. |
 | `shared/` | Car App Library code plus the CH341, I2C, MFi, iPhone, iAP2, NCM, VPN, AirPlay, and media implementations. |
+
+## Remote MFI
+
+The Remote MFi client treats a remote service as an MFi chip for remote calls,
+or uses BAA authentication. Remote authentication avoids the process of
+connecting to a local MFi chip for authentication.
+
+### Endpoints
+
+| Method | Path | Purpose | Request body | Success response | Failure response |
+| --- | --- | --- | --- | --- | --- |
+| `GET` | `/mfi/certificate` | Get the MFi chip version, certificate type, and certificate contents; cached by the client after the first call | None | Certificate JSON | `{"detail":"..."}` |
+| `POST` | `/mfi/sign` | Sign the challenge | `{"challenge":"...","requestId":"..."}` | `{"signature":"..."}` | `{"detail":"..."}` |
+| `POST` | `/mfi/reset` | Request a reset of the remote MFi chip | `{}` | `{"detail":""}` | `{"detail":"..."}` |
+
+(Optional) Standard Bearer Authentication can be used for verification.
+
+**Currently, only BAA Authentication has been tested.**
 
 ## Requirements
 
@@ -78,6 +96,8 @@ Unsigned release APKs:
 
 Thanks to [LIVI](https://github.com/f-io/LIVI) for providing important
 reference for this project.
+Thanks to the [showcase](https://github.com/amineross/showcase) project for
+providing important reference for the BAA authentication in this project.
 
 ## License
 
