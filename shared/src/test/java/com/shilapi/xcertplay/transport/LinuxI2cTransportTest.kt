@@ -7,6 +7,18 @@ import org.junit.Test
 
 class LinuxI2cTransportTest {
     @Test
+    fun splitReadModeUsesOneMessagePerByte() {
+        val bridge = SplitReadBridge(byteArrayOf(0x30, 0x31, 0x32))
+        val transport = LinuxI2cTransport.open("/dev/i2c-0", bridge, splitPureReads = true)
+
+        assertArrayEquals(
+            byteArrayOf(0x30, 0x31, 0x32),
+            transport.transaction(0x10, byteArrayOf(), 3),
+        )
+        assertEquals(listOf(1, 1, 1), bridge.readLengths)
+    }
+
+    @Test
     fun transactionDelegatesCombinedReadAndMapsNackBeforeClose() {
         val bridge = RecordingBridge(response = byteArrayOf(0x12, 0x34))
         val transport = LinuxI2cTransport.open("/dev/i2c-2", bridge)
@@ -66,5 +78,24 @@ class LinuxI2cTransportTest {
         override fun close(handle: Int) {
             closedHandle = handle
         }
+    }
+
+    private class SplitReadBridge(private val values: ByteArray) : LinuxI2cBridge {
+        private var offset = 0
+        val readLengths = mutableListOf<Int>()
+
+        override fun open(devicePath: String): Int = 8
+
+        override fun transaction(
+            handle: Int,
+            address7Bit: Int,
+            writeData: ByteArray,
+            readLength: Int,
+        ): ByteArray {
+            readLengths += readLength
+            return byteArrayOf(values[offset++])
+        }
+
+        override fun close(handle: Int) = Unit
     }
 }

@@ -44,6 +44,12 @@ object AirPlayPersistence {
     private const val KEY_MANUAL_HOTSPOT_CHANNEL = "manual_hotspot_channel"
     private const val KEY_MANUAL_HOTSPOT_SECURITY = "manual_hotspot_security"
     private const val KEY_DEBUG_LOGS_ENABLED = "debug_logs_enabled"
+    private const val KEY_PERFORMANCE_STATS_ENABLED = "performance_stats_enabled"
+    private const val KEY_VIDEO_LOW_LATENCY_ENABLED = "video_low_latency_enabled"
+    private const val KEY_STABLE_VIDEO_TIMESTAMPS_ENABLED = "stable_video_timestamps_enabled"
+    private const val KEY_PRESERVE_VIDEO_FRAMES_ENABLED = "preserve_video_frames_enabled"
+    private const val KEY_AUDIO_LOW_LATENCY_ENABLED = "audio_low_latency_enabled"
+    private const val KEY_PROTOCOL_TRACE_ENABLED = "protocol_trace_enabled"
     private const val KEY_MANUFACTURER = "manufacturer"
     private const val KEY_MODEL = "model"
     private const val KEY_OEM_LABEL = "oem_label"
@@ -68,7 +74,9 @@ object AirPlayPersistence {
     const val DEFAULT_MANUFACTURER = "xcertplay"
     const val DEFAULT_MODEL = "xcertplay"
     const val DEFAULT_OEM_LABEL = ""
-    const val DEFAULT_MFI_I2C_PATH = "/dev/i2c-1"
+    // QZD/trinket head unit: ZLINK uses adapter 0 and the coprocessor answers at 0x10.
+    // Address discovery remains in MfiDeviceScanner; only the board device path is fixed here.
+    const val DEFAULT_MFI_I2C_PATH = "/dev/i2c-0"
 
     fun loadDisplayScaleTenths(context: Context): Int {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -126,7 +134,7 @@ object AirPlayPersistence {
     fun loadMfiTarget(context: Context): MfiTarget {
         val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_MFI_TARGET, null)
-        return MfiTarget.entries.firstOrNull { it.name == stored } ?: MfiTarget.USB_CH341
+        return MfiTarget.entries.firstOrNull { it.name == stored } ?: MfiTarget.I2C
     }
 
     fun saveMfiTarget(context: Context, target: MfiTarget) {
@@ -259,6 +267,66 @@ object AirPlayPersistence {
     fun saveDebugLogsEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_DEBUG_LOGS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadPerformanceStatsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_PERFORMANCE_STATS_ENABLED, true)
+
+    fun savePerformanceStatsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_PERFORMANCE_STATS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadVideoLowLatencyEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_VIDEO_LOW_LATENCY_ENABLED, true)
+
+    fun saveVideoLowLatencyEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_VIDEO_LOW_LATENCY_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadStableVideoTimestampsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_STABLE_VIDEO_TIMESTAMPS_ENABLED, true)
+
+    fun saveStableVideoTimestampsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_STABLE_VIDEO_TIMESTAMPS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadPreserveVideoFramesEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_PRESERVE_VIDEO_FRAMES_ENABLED, true)
+
+    fun savePreserveVideoFramesEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_PRESERVE_VIDEO_FRAMES_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadAudioLowLatencyEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUDIO_LOW_LATENCY_ENABLED, true)
+
+    fun saveAudioLowLatencyEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_AUDIO_LOW_LATENCY_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadProtocolTraceEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_PROTOCOL_TRACE_ENABLED, false)
+
+    fun saveProtocolTraceEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_PROTOCOL_TRACE_ENABLED, enabled)
             .apply()
     }
 

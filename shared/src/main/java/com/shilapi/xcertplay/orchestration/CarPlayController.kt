@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.ComponentName
 import android.content.Context
@@ -64,6 +65,7 @@ import com.shilapi.xcertplay.transport.LockdownPairingClient
 import com.shilapi.xcertplay.transport.LockdownPairRecord
 import com.shilapi.xcertplay.transport.NcmFunctionDiscovery
 import com.shilapi.xcertplay.transport.NcmUsbBridge
+import com.shilapi.xcertplay.transport.ZjinnovaZbtDuplexStream
 import java.io.Closeable
 import java.io.IOException
 import java.net.InetAddress
@@ -183,8 +185,9 @@ class CarPlayController(
     @Volatile private var activeSession: AirPlaySession? = null
     @Volatile private var hotspot: WirelessHotspotManager? = null
     @Volatile private var bonjour: CarPlayBonjour? = null
+    @Volatile private var bluetoothRegistrationSocket: BluetoothServerSocket? = null
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
-    @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
+    @Volatile private var bluetoothStream: BlockingDuplexByteStream? = null
     @Volatile private var wirelessTunnelChannel: Iap2CsmChannel? = null
     @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
@@ -220,6 +223,12 @@ class CarPlayController(
                 "AirPlay session active controller=${session.controllerId ?: "unknown"} " +
                     "peer=${session.host}",
             )
+            // Some Zjinnova firmwares never expose the optional type-130 tunneled iAP2
+            // connection after AirPlay is established.  The live AirPlay control session is
+            // nevertheless sufficient proof that the Wi-Fi handoff succeeded.
+            if (config.transport == CarPlayTransport.WIRELESS) {
+                maybeCompleteWirelessHandoff()
+            }
             uiListener?.onSessionActive(session)
         }
 
@@ -259,7 +268,7 @@ class CarPlayController(
             ) {
                 debugLog(
                     "wireless CarPlay Bluetooth handoff requested; " +
-                        "waiting for tunnel iAP2 readiness",
+                        "checking Wi-Fi session readiness",
                 )
                 armWirelessHandoffWatchdog(wirelessGeneration.get())
                 maybeCompleteWirelessHandoff()
@@ -749,20 +758,37 @@ class CarPlayController(
             }
 
             onStatus(CarPlayStatus.ConnectingBluetooth)
-            debugLog(
-                "wireless RFCOMM connecting address=${device.address} " +
-                    "uuid=$IAP2_IPHONE_UUID",
-            )
-            val socket = device
+            val stream = ZjinnovaZbtDuplexStream.openIfAvailable()?.also {
+                bluetoothStream = it
+                debugLog("wireless RFCOMM using standalone Zjinnova ZBT transport")
+            } ?: run {
+                registerVendorRfcommUuid(adapter)
+                debugLog(
+                    "wireless RFCOMM connecting address=${device.address} " +
+                        "uuid=$IAP2_IPHONE_UUID",
+                )
+                var socket = device
                     .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
                     .also { bluetoothSocket = it }
-            connectBluetoothSocket(socket, device.address)
-            debugLog("wireless RFCOMM connected address=${device.address}")
+                try {
+                    connectBluetoothSocket(socket, device.address)
+                } catch (uuidFailure: IOException) {
+                    debugLog(
+                        "wireless RFCOMM UUID connect failed (${uuidFailure.message}); " +
+                            "trying direct channel $IAP2_RFCOMM_CHANNEL",
+                    )
+                    runCatching { socket.close() }
+                    socket = createDirectRfcommSocket(device, IAP2_RFCOMM_CHANNEL)
+                        .also { bluetoothSocket = it }
+                    connectBluetoothSocket(socket, device.address)
+                }
+                debugLog("wireless RFCOMM connected address=${device.address}")
+                BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
+            }
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
                 return
             }
-            val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
             val channel = Iap2CsmChannel.openWireless(stream).also { csm = it }
             debugLog("wireless iAP2 CSM channel opened over RFCOMM")
             if (isStaleWirelessRun(generation)) {
@@ -929,7 +955,10 @@ class CarPlayController(
     }
 
     private fun maybeCompleteWirelessHandoff() {
-        if (!wirelessHandoffRequested.get() || !wirelessTunnelReady.get()) return
+        if (!wirelessHandoffRequested.get()) return
+        val tunnelReady = wirelessTunnelReady.get()
+        val airPlayReady = activeSession != null
+        if (!tunnelReady && !airPlayReady) return
         if (!wirelessActiveReported.compareAndSet(false, true)) return
         val generation = wirelessGeneration.get()
         Thread(
@@ -941,7 +970,11 @@ class CarPlayController(
                 ) {
                     return@Thread
                 }
-                debugLog("wireless handoff ready; closing Bluetooth bootstrap transport")
+                debugLog(
+                    "wireless handoff ready via " +
+                        (if (tunnelReady) "tunneled iAP2" else "active AirPlay session") +
+                        "; closing Bluetooth bootstrap transport",
+                )
                 closeBluetoothBootstrapTransport()
                 onStatus(CarPlayStatus.WirelessActive)
             },
@@ -964,7 +997,7 @@ class CarPlayController(
                 ) {
                     return@postDelayed
                 }
-                debugLog("wireless handoff timed out waiting for tunnel iAP2 readiness")
+                debugLog("wireless handoff timed out waiting for Wi-Fi session readiness")
                 Thread(
                     {
                         if (
@@ -976,7 +1009,7 @@ class CarPlayController(
                             return@Thread
                         }
                         closeWirelessStack()
-                        fail(IOException("Wireless CarPlay handoff timed out waiting for tunnel iAP2"))
+                        fail(IOException("Wireless CarPlay handoff timed out waiting for Wi-Fi session"))
                     },
                     "xcertplay-wireless-handoff-timeout",
                 ).apply {
@@ -1000,6 +1033,14 @@ class CarPlayController(
         val activeSocket = bluetoothSocket
         bluetoothSocket = null
         if (activeSocket != null) closeBestEffort("wireless Bluetooth socket") { activeSocket.close() }
+
+        val activeRegistrationSocket = bluetoothRegistrationSocket
+        bluetoothRegistrationSocket = null
+        if (activeRegistrationSocket != null) {
+            closeBestEffort("vendor RFCOMM registration socket") {
+                activeRegistrationSocket.close()
+            }
+        }
     }
 
     private fun startIphone() {
@@ -1417,6 +1458,66 @@ class CarPlayController(
         }
     }
 
+    private fun createDirectRfcommSocket(device: BluetoothDevice, channel: Int): BluetoothSocket {
+        val methods = listOf("createRfcommSocket", "createInsecureRfcommSocket")
+        var lastFailure: Throwable? = null
+        for (methodName in methods) {
+            try {
+                val method = BluetoothDevice::class.java.getDeclaredMethod(
+                    methodName,
+                    Int::class.javaPrimitiveType,
+                )
+                method.isAccessible = true
+                val socket = method.invoke(device, channel) as? BluetoothSocket
+                    ?: throw IOException("$methodName returned no Bluetooth socket")
+                debugLog("wireless RFCOMM direct socket created method=$methodName channel=$channel")
+                return socket
+            } catch (error: Throwable) {
+                lastFailure = error.cause ?: error
+                debugLog(
+                    "wireless RFCOMM direct socket method=$methodName unavailable: " +
+                        "${lastFailure.javaClass.simpleName}: ${lastFailure.message}",
+                )
+            }
+        }
+        throw IOException(
+            "Could not create a direct RFCOMM socket for channel $channel",
+            lastFailure,
+        )
+    }
+
+    /**
+     * Chengqian/Zjinnova head units route RFCOMM through their `blink` daemon. Their modified
+     * Bluetooth JNI only accepts UUIDs that have first gone through its server-listen path; that
+     * path emits the vendor RFREG command and installs the UUID/channel mapping used by connect.
+     * Opening the listener is therefore a registration trigger, not an inbound CarPlay server.
+     */
+    private fun registerVendorRfcommUuid(adapter: BluetoothAdapter) {
+        val uuid = UUID.fromString(IAP2_IPHONE_UUID)
+        debugLog("wireless RFCOMM vendor registration requested uuid=$IAP2_IPHONE_UUID")
+        val registrationSocket = try {
+            adapter.listenUsingRfcommWithServiceRecord(VENDOR_RFCOMM_SERVICE_NAME, uuid)
+        } catch (error: Throwable) {
+            // On this vendor stack the registration command may be sent before the framework
+            // reports that it could not create a conventional listening file descriptor.
+            debugLog(
+                "wireless RFCOMM vendor registration trigger returned " +
+                    "${error.javaClass.simpleName}: ${error.message}",
+            )
+            null
+        }
+        bluetoothRegistrationSocket = registrationSocket
+        if (registrationSocket != null) {
+            debugLog("wireless RFCOMM vendor registration listener opened")
+        }
+        try {
+            Thread.sleep(VENDOR_RFCOMM_REGISTRATION_DELAY_MILLIS)
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IOException("Interrupted while registering the RFCOMM UUID", error)
+        }
+    }
+
     private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
         media.setIapTunnelHandler(null)
         val activeTunnel = wirelessTunnelChannel
@@ -1720,6 +1821,9 @@ class CarPlayController(
 
     companion object {
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
+        private const val IAP2_RFCOMM_CHANNEL = 1
+        private const val VENDOR_RFCOMM_SERVICE_NAME = "xcertplay-iap2"
+        private const val VENDOR_RFCOMM_REGISTRATION_DELAY_MILLIS = 750L
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
         private const val WIFI_P2P_START_TIMEOUT_MILLIS = 20_000L
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L

@@ -56,13 +56,14 @@ class MfiSelfCheckTest {
 
         assertEquals(
             listOf(0x10 to 0x00, 0x11 to 0x00, 0x11 to -1, 0x11 to 0x02, 0x11 to -1),
-            calls,
+            calls.take(5),
         )
         assertEquals(0x11, result.discovery.chip?.address7Bit)
         assertEquals(3, result.discovery.chip?.deviceVersion)
         assertEquals(0x10, result.discovery.failures.single().address7Bit)
         assertTrue(result.chip?.protocolMajor is MfiProtocolMajorResult.Value)
         assertEquals(7, (result.chip?.protocolMajor as MfiProtocolMajorResult.Value).major)
+        assertTrue(result.chip?.certificate is MfiCertificateResult.Failure)
     }
 
     private fun bytes(vararg values: Int): ByteArray = ByteArray(values.size) { values[it].toByte() }

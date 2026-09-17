@@ -13,6 +13,7 @@ import java.io.IOException
 class LinuxI2cTransport private constructor(
     private val bridge: LinuxI2cBridge,
     private val handle: Int,
+    private val splitPureReads: Boolean,
 ) : I2cTransport, Closeable {
     private val lock = Any()
     private var closed = false
@@ -23,7 +24,12 @@ class LinuxI2cTransport private constructor(
             validateTransaction(address7Bit, writeData, readLength)
 
             try {
-                bridge.transaction(handle, address7Bit, writeData, readLength).also { response ->
+                val response = if (splitPureReads && writeData.isEmpty() && readLength > 1) {
+                    splitPureRead(address7Bit, readLength)
+                } else {
+                    bridge.transaction(handle, address7Bit, writeData, readLength)
+                }
+                response.also {
                     if (response.size != readLength) {
                         throw I2cTransportException.Protocol(
                             "I2C backend returned ${response.size} bytes, expected $readLength",
@@ -34,6 +40,45 @@ class LinuxI2cTransport private constructor(
                 throw mapNativeError(error)
             }
         }
+
+    /**
+     * The QZD/trinket coprocessor uses ZLINK's readmode=1: after a register-select STOP,
+     * each byte is fetched as its own one-byte read message. It intermittently returns
+     * ENOTCONN while waking, so retry only that current byte instead of restarting the
+     * whole 128-byte register window.
+     */
+    private fun splitPureRead(address7Bit: Int, readLength: Int): ByteArray {
+        val output = ByteArray(readLength)
+        for (offset in output.indices) {
+            var attempts = 0
+            while (true) {
+                try {
+                    val value = bridge.transaction(handle, address7Bit, ByteArray(0), 1)
+                    if (value.size != 1) {
+                        throw I2cTransportException.Protocol(
+                            "Single-byte I2C backend returned ${value.size} bytes",
+                        )
+                    }
+                    output[offset] = value[0]
+                    break
+                } catch (error: LinuxI2cNativeException) {
+                    if (error.errnoCode !in TRANSIENT_BYTE_READ_ERRNOS || ++attempts >= BYTE_READ_ATTEMPTS) {
+                        throw error
+                    }
+                    try {
+                        Thread.sleep(BYTE_READ_RETRY_MILLIS)
+                    } catch (interrupted: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw I2cTransportException.DeviceUnavailable(
+                            "I2C byte read was interrupted",
+                            interrupted,
+                        )
+                    }
+                }
+            }
+        }
+        return output
+    }
 
     override fun close() {
         synchronized(lock) {
@@ -59,9 +104,14 @@ class LinuxI2cTransport private constructor(
 
         /** Opens a Linux I2C device node. */
         @Throws(I2cTransportException::class)
-        fun open(devicePath: String): LinuxI2cTransport = open(devicePath, NativeLinuxI2cBridge)
+        fun open(devicePath: String): LinuxI2cTransport =
+            open(devicePath, NativeLinuxI2cBridge, splitPureReads = devicePath == "/dev/i2c-0")
 
-        internal fun open(devicePath: String, bridge: LinuxI2cBridge): LinuxI2cTransport {
+        internal fun open(
+            devicePath: String,
+            bridge: LinuxI2cBridge,
+            splitPureReads: Boolean = false,
+        ): LinuxI2cTransport {
             if (!I2C_DEVICE_PATH.matches(devicePath)) {
                 throw I2cTransportException.InvalidRequest(
                     "I2C device path must be /dev/i2c-N: $devicePath",
@@ -69,7 +119,7 @@ class LinuxI2cTransport private constructor(
             }
 
             return try {
-                LinuxI2cTransport(bridge, bridge.open(devicePath))
+                LinuxI2cTransport(bridge, bridge.open(devicePath), splitPureReads)
             } catch (error: LinuxI2cNativeException) {
                 throw mapNativeError(error)
             }
@@ -95,13 +145,17 @@ class LinuxI2cTransport private constructor(
             when (error.errnoCode) {
                 1, 13 -> I2cTransportException.PermissionDenied(error.message ?: "I2C permission denied")
                 110 -> I2cTransportException.TimedOut(error.message ?: "I2C transaction timed out", error)
-                121 -> I2cTransportException.Nack(error.message ?: "I2C remote NACK")
+                107, 121 -> I2cTransportException.Nack(error.message ?: "I2C remote NACK")
                 2, 6, 9, 16, 19 -> I2cTransportException.DeviceUnavailable(
                     error.message ?: "I2C device unavailable",
                     error,
                 )
                 else -> I2cTransportException.Protocol(error.message ?: "I2C native operation failed", error)
             }
+
+        private val TRANSIENT_BYTE_READ_ERRNOS = setOf(107, 110, 121)
+        private const val BYTE_READ_ATTEMPTS = 100
+        private const val BYTE_READ_RETRY_MILLIS = 20L
     }
 }
 

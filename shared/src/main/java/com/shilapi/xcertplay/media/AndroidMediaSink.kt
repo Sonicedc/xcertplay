@@ -16,9 +16,20 @@ import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.VideoCodec
 import com.shilapi.xcertplay.airplay.toHexString
 import java.io.Closeable
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
+
+data class MediaPerformanceStats(
+    val streamType: Int,
+    val decoderName: String,
+    val receivedFrames: Long,
+    val renderedFrames: Long,
+    val renderedFps: Double,
+    val queueDepth: Int,
+    val decoderWaits: Long,
+)
 
 /**
  * Android rendering backend for the CarPlay media engine. Video frames are
@@ -31,7 +42,12 @@ class AndroidMediaSink(
     private val videoHeight: Int = 720,
     private val preferSoftwareHevcDecoder: Boolean = false,
     private val advancedAudioChannelMapping: Boolean = false,
+    private val videoLowLatencyEnabled: Boolean = true,
+    private val stableVideoTimestampsEnabled: Boolean = true,
+    private val preserveVideoFramesEnabled: Boolean = true,
+    private val audioLowLatencyEnabled: Boolean = true,
     onScreenStreamActiveChanged: ((Int, Boolean) -> Unit)? = null,
+    private val onPerformanceStats: ((MediaPerformanceStats) -> Unit)? = null,
 ) : MediaSink {
     private val defaultSurface = surface
     @Volatile private var screenStreamActiveChanged = onScreenStreamActiveChanged
@@ -104,10 +120,15 @@ class AndroidMediaSink(
     private fun videoDecoder(type: Int): VideoDecoder =
         videoDecoders.computeIfAbsent(type) {
             VideoDecoder(
+                type,
                 surfaces[type] ?: defaultSurface,
                 videoWidth,
                 videoHeight,
                 preferSoftwareHevcDecoder,
+                videoLowLatencyEnabled,
+                stableVideoTimestampsEnabled,
+                preserveVideoFramesEnabled,
+                onPerformanceStats,
             )
         }
 
@@ -116,7 +137,11 @@ class AndroidMediaSink(
         val existing = audioRenderers[type]
         if (existing?.format == format) return existing
         existing?.close()
-        return AudioRenderer(format, advancedAudioChannelMapping).also { audioRenderers[type] = it }
+        return AudioRenderer(
+            format,
+            advancedAudioChannelMapping,
+            audioLowLatencyEnabled,
+        ).also { audioRenderers[type] = it }
     }
 }
 
@@ -128,10 +153,15 @@ private sealed interface VideoJob {
 
 /** Serial MediaCodec video decoder: one worker owns configure and frame feeding. */
 private class VideoDecoder(
+    private val streamType: Int,
     surface: Surface?,
     private val width: Int,
     private val height: Int,
     private val preferSoftwareHevcDecoder: Boolean,
+    private val lowLatencyEnabled: Boolean,
+    private val stableTimestampsEnabled: Boolean,
+    private val preserveFramesEnabled: Boolean,
+    private val onPerformanceStats: ((MediaPerformanceStats) -> Unit)?,
 ) : Closeable {
     private val queue = LinkedBlockingQueue<VideoJob>()
     @Volatile private var running = true
@@ -141,6 +171,13 @@ private class VideoDecoder(
     private var renderedFrameLogged = false
     private var submittedFrameLogged = false
     private var duplicateConfigLogged = false
+    private var nextPresentationTimeUs = 0L
+    @Volatile private var receivedFrames = 0L
+    private var renderedFrames = 0L
+    private var renderedFramesAtWindowStart = 0L
+    private var decoderWaits = 0L
+    private var statsWindowStartNs = System.nanoTime()
+    private var decoderName = "not-configured"
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true; start() }
 
     fun configure(codec: VideoCodec, codecData: ByteArray) {
@@ -148,6 +185,7 @@ private class VideoDecoder(
     }
 
     fun submit(nalus: ByteArray) {
+        receivedFrames++
         queue.offer(VideoJob.Frame(nalus))
     }
 
@@ -205,6 +243,16 @@ private class VideoDecoder(
         else MediaFormat.MIMETYPE_VIDEO_AVC
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
+            if (lowLatencyEnabled) {
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_FRAME_RATE, TARGET_VIDEO_FRAME_RATE)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    setFloat(MediaFormat.KEY_OPERATING_RATE, TARGET_VIDEO_FRAME_RATE.toFloat())
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                }
+            }
         }
         if (codec == VideoCodec.H265) {
             val csd = MediaCodecSupport.hevcCodecSpecificData(codecData)
@@ -226,7 +274,14 @@ private class VideoDecoder(
         decoder = next
         renderedFrameLogged = false
         submittedFrameLogged = false
+        nextPresentationTimeUs = 0L
+        receivedFrames = 0L
+        renderedFrames = 0L
+        renderedFramesAtWindowStart = 0L
+        decoderWaits = 0L
+        statsWindowStartNs = System.nanoTime()
         if (next != null) {
+            decoderName = next.name
             Log.i(
                 TAG,
                 "video decoder configured name=${next.name} mime=$mime size=${width}x$height",
@@ -287,15 +342,40 @@ private class VideoDecoder(
             )
         }
         if (annexB.isEmpty()) return
-        val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
-        if (index < 0) return
-        val input = codec.getInputBuffer(index) ?: return
+
+        // HEVC frames are predictive. Silently dropping a frame because the decoder was busy
+        // corrupts every later frame that references it, producing stale macroblock mosaics until
+        // the next IDR. Drain completed output and wait for backpressure instead; the screen stream
+        // is TCP, so each complete encrypted frame has already arrived intact.
+        var index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
+        if (preserveFramesEnabled) {
+            while (running && index < 0) {
+                decoderWaits++
+                drainOutput(codec)
+                index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
+            }
+        } else if (index < 0) {
+            decoderWaits++
+            emitPerformanceStats()
+            return
+        }
+        if (!running) return
+        val input = codec.getInputBuffer(index)
+            ?: throw IOException("Video decoder returned an input slot without a buffer")
         input.clear()
         if (annexB.size <= input.remaining()) {
             input.put(annexB)
-            codec.queueInputBuffer(index, 0, annexB.size, System.nanoTime() / 1000, 0)
+            val presentationTimeUs = if (stableTimestampsEnabled) {
+                nextPresentationTimeUs.also { nextPresentationTimeUs += VIDEO_FRAME_DURATION_US }
+            } else {
+                System.nanoTime() / 1000
+            }
+            codec.queueInputBuffer(index, 0, annexB.size, presentationTimeUs, 0)
         } else {
             codec.queueInputBuffer(index, 0, 0, 0, 0)
+            throw IOException(
+                "Video access unit ${annexB.size} exceeds decoder input capacity ${input.capacity()}",
+            )
         }
         drainOutput(codec)
     }
@@ -310,15 +390,40 @@ private class VideoDecoder(
                 index >= 0 -> {
                     val render = outputSurface != null
                     codec.releaseOutputBuffer(index, render)
-                    if (render && !renderedFrameLogged) {
-                        renderedFrameLogged = true
-                        Log.i(TAG, "video decoder rendered first frame bytes=${info.size}")
+                    if (render) {
+                        renderedFrames++
+                        emitPerformanceStats()
+                        if (!renderedFrameLogged) {
+                            renderedFrameLogged = true
+                            Log.i(TAG, "video decoder rendered first frame bytes=${info.size}")
+                        }
                     }
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
                 }
                 else -> return
             }
         }
+    }
+
+    private fun emitPerformanceStats() {
+        val listener = onPerformanceStats ?: return
+        val now = System.nanoTime()
+        val elapsedNs = now - statsWindowStartNs
+        if (elapsedNs < STATS_INTERVAL_NS) return
+        val windowFrames = renderedFrames - renderedFramesAtWindowStart
+        listener(
+            MediaPerformanceStats(
+                streamType = streamType,
+                decoderName = decoderName,
+                receivedFrames = receivedFrames,
+                renderedFrames = renderedFrames,
+                renderedFps = windowFrames * 1_000_000_000.0 / elapsedNs,
+                queueDepth = queue.size,
+                decoderWaits = decoderWaits,
+            ),
+        )
+        renderedFramesAtWindowStart = renderedFrames
+        statsWindowStartNs = now
     }
 
     private fun logOutputFormat(format: MediaFormat) {
@@ -339,6 +444,7 @@ private class VideoDecoder(
     private fun releaseDecoder() {
         val codec = decoder
         decoder = null
+        nextPresentationTimeUs = 0L
         if (codec != null) {
             try {
                 codec.stop()
@@ -357,6 +463,9 @@ private class VideoDecoder(
         const val TAG = "xcertplay-usb"
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
         const val INPUT_TIMEOUT_US = 10_000L
+        const val TARGET_VIDEO_FRAME_RATE = 60
+        const val VIDEO_FRAME_DURATION_US = 1_000_000L / TARGET_VIDEO_FRAME_RATE
+        const val STATS_INTERVAL_NS = 1_000_000_000L
         val START_CODE = byteArrayOf(0x00, 0x00, 0x00, 0x01)
     }
 }
@@ -376,6 +485,7 @@ private fun MediaFormat.intOrNull(key: String): Int? =
 private class AudioRenderer(
     val format: AudioFormat,
     private val advancedAudioChannelMapping: Boolean,
+    private val lowLatencyEnabled: Boolean,
 ) : Closeable {
     private data class AudioPacket(val rtp: ByteArray, val sample: Int)
 
@@ -480,13 +590,17 @@ private class AudioRenderer(
             Log.e(TAG, "AudioTrack buffer size unavailable rate=${format.sampleRate} channels=${format.channels}")
             return
         }
-        val bufferBytes = maxOf(minBuffer * 4, MIN_TRACK_BUFFER_BYTES)
-        startThresholdBytes = if (format.audioType == "telephony" || format.audioType == "speechrecognition") {
-            maxOf(minBuffer, MIN_START_BUFFER_BYTES)
+        val bufferBytes = if (lowLatencyEnabled) {
+            maxOf(minBuffer * 2, LOW_LATENCY_TRACK_BUFFER_BYTES)
+        } else {
+            maxOf(minBuffer * 4, MIN_TRACK_BUFFER_BYTES)
+        }
+        startThresholdBytes = if (lowLatencyEnabled) {
+            maxOf(minBuffer / 2, LOW_LATENCY_START_BUFFER_BYTES)
         } else {
             maxOf(minBuffer, MIN_START_BUFFER_BYTES)
         }
-        track = AudioTrack.Builder()
+        val builder = AudioTrack.Builder()
             .setAudioAttributes(audioAttributes())
             .setAudioFormat(
                 AndroidAudioFormat.Builder()
@@ -497,7 +611,10 @@ private class AudioRenderer(
             )
             .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
+        if (lowLatencyEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+        }
+        track = builder.build()
         Log.i(
             TAG,
             "audio track prepared type=${format.payloadType} audioType=${format.audioType} " +
@@ -800,6 +917,8 @@ private class AudioRenderer(
         const val MAX_QUEUED_PACKETS = 64
         const val MIN_TRACK_BUFFER_BYTES = 16 * 1024
         const val MIN_START_BUFFER_BYTES = 4 * 1024
+        const val LOW_LATENCY_TRACK_BUFFER_BYTES = 8 * 1024
+        const val LOW_LATENCY_START_BUFFER_BYTES = 2 * 1024
         const val PREBUFFER_WRITE_CHUNK_BYTES = 2 * 1024
         const val DECODED_BUFFER_LOG_INTERVAL = 50
     }

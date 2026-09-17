@@ -22,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.shilapi.xcertplay.mfi.MfiProtocolMajorResult
+import com.shilapi.xcertplay.mfi.MfiCertificateResult
 import com.shilapi.xcertplay.mfi.MfiSelfCheck
 import com.shilapi.xcertplay.mfi.MfiSelfCheckResult
 import com.shilapi.xcertplay.transport.LinuxI2cTransport
@@ -38,7 +39,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             XcertplayTheme {
-                var devicePath by remember { mutableStateOf("/dev/i2c-1") }
+                var devicePath by remember {
+                    mutableStateOf(AirPlayPersistence.DEFAULT_MFI_I2C_PATH)
+                }
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
                     Column(
                         modifier = Modifier.padding(padding).padding(24.dp),
@@ -112,10 +115,19 @@ private sealed class DiagnosticStatus {
                 is MfiProtocolMajorResult.MfiFailure -> result.error.message ?: result.error.javaClass.simpleName
                 is MfiProtocolMajorResult.TransportFailure -> result.error.message ?: result.error.javaClass.simpleName
             }
-            "Found: 0x%02X; device version: 0x%02X; protocol major (raw): %s".format(
+            val certificate = when (val result = chip.certificate) {
+                is MfiCertificateResult.Value ->
+                    "certificate: ${result.packageLength} bytes, SHA-256 ${result.packageSha256}; " +
+                        "subject: ${result.subject}; issuer: ${result.issuer}; " +
+                        "serial: ${result.serialHex}; ${result.signatureAlgorithm}/${result.publicKeyAlgorithm}"
+                is MfiCertificateResult.Failure -> "certificate read failed: ${result.message}"
+                is MfiCertificateResult.Invalid -> "certificate invalid: ${result.message}"
+            }
+            "Found: 0x%02X; device version: 0x%02X; protocol major (raw): %s; %s".format(
                 chip.address7Bit,
                 chip.deviceVersion,
                 major,
+                certificate,
             )
         }
     }

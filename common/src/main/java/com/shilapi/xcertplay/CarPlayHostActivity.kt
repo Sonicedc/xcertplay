@@ -61,6 +61,7 @@ import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
+import com.shilapi.xcertplay.media.MediaPerformanceStats
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
@@ -231,6 +232,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var statusView: TextView? = null
     private var statusScrollView: ScrollView? = null
     private var stageStatusView: TextView? = null
+    private var performanceStatsView: TextView? = null
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var hotspotStatusView: TextView? = null
@@ -256,6 +258,12 @@ class CarPlayHostActivity : ComponentActivity() {
     private var advancedAudioChannelMappingSupported = false
     private var advancedAudioChannelMapping = false
     private var debugLogsEnabled = false
+    private var performanceStatsEnabled = true
+    private var videoLowLatencyEnabled = true
+    private var stableVideoTimestampsEnabled = true
+    private var preserveVideoFramesEnabled = true
+    private var audioLowLatencyEnabled = true
+    private var protocolTraceEnabled = false
     private var autoStartOnBoot = false
     private var manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER
     private var model = AirPlayPersistence.DEFAULT_MODEL
@@ -410,6 +418,12 @@ class CarPlayHostActivity : ComponentActivity() {
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
+        performanceStatsEnabled = AirPlayPersistence.loadPerformanceStatsEnabled(this)
+        videoLowLatencyEnabled = AirPlayPersistence.loadVideoLowLatencyEnabled(this)
+        stableVideoTimestampsEnabled = AirPlayPersistence.loadStableVideoTimestampsEnabled(this)
+        preserveVideoFramesEnabled = AirPlayPersistence.loadPreserveVideoFramesEnabled(this)
+        audioLowLatencyEnabled = AirPlayPersistence.loadAudioLowLatencyEnabled(this)
+        protocolTraceEnabled = AirPlayPersistence.loadProtocolTraceEnabled(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
         manufacturer = AirPlayPersistence.loadManufacturer(this)
         model = AirPlayPersistence.loadModel(this)
@@ -622,6 +636,19 @@ class CarPlayHostActivity : ComponentActivity() {
                 setColor(Color.argb(170, 0, 0, 0))
             }
         }
+        val performanceStats = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            includeFontPadding = false
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(8).toFloat()
+                setColor(Color.argb(170, 0, 0, 0))
+            }
+            visibility = View.GONE
+        }
         val statusParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -634,6 +661,12 @@ class CarPlayHostActivity : ComponentActivity() {
             Gravity.TOP or Gravity.END,
         )
         stageParams.setMargins(dp(12), dp(12), dp(12), 0)
+        val performanceStatsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START,
+        )
+        performanceStatsParams.setMargins(dp(12), dp(12), dp(12), 0)
 
         val settings = buildSettingsMenu().apply { visibility = View.GONE }
         val editor = buildSafeAreaEditor().apply { visibility = View.GONE }
@@ -648,6 +681,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         root.addView(logScroll, statusParams)
         root.addView(stageStatus, stageParams)
+        root.addView(performanceStats, performanceStatsParams)
         root.addView(
             settings,
             FrameLayout.LayoutParams(
@@ -669,6 +703,7 @@ class CarPlayHostActivity : ComponentActivity() {
         statusView = log
         statusScrollView = logScroll
         stageStatusView = stageStatus
+        performanceStatsView = performanceStats
         updateDebugOverlays()
         return root
     }
@@ -1114,6 +1149,21 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
         content.addView(
+            settingsCategoryHeader("Low-latency tuning"),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(40) },
+        )
+        content.addView(
+            buildLowLatencySettingsSection(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+
+        content.addView(
             buildSafeAreaSection(),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1303,6 +1353,12 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveModel(this, model)
         AirPlayPersistence.saveOemLabel(this, oemLabel)
         AirPlayPersistence.saveDebugLogsEnabled(this, debugLogsEnabled)
+        AirPlayPersistence.savePerformanceStatsEnabled(this, performanceStatsEnabled)
+        AirPlayPersistence.saveVideoLowLatencyEnabled(this, videoLowLatencyEnabled)
+        AirPlayPersistence.saveStableVideoTimestampsEnabled(this, stableVideoTimestampsEnabled)
+        AirPlayPersistence.savePreserveVideoFramesEnabled(this, preserveVideoFramesEnabled)
+        AirPlayPersistence.saveAudioLowLatencyEnabled(this, audioLowLatencyEnabled)
+        AirPlayPersistence.saveProtocolTraceEnabled(this, protocolTraceEnabled)
         AirPlayPersistence.saveRightHandDrive(this, rightHandDrive)
         AirPlayPersistence.saveHideTopBar(this, hideTopBar)
         AirPlayPersistence.saveHideBottomBar(this, hideBottomBar)
@@ -1410,7 +1466,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 ),
             )
             addView(
-                menuText("Linux device path, for example /dev/i2c-1.", 14f, MENU_SECONDARY),
+                menuText("Linux device path, for example /dev/i2c-0.", 14f, MENU_SECONDARY),
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1631,16 +1687,104 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
-    private fun buildDebugLogsSection(): View =
-        settingsSwitchRow(
-            label = "Debug logs",
-            checked = debugLogsEnabled,
-            description = "Show on-screen debug logs",
-        ) { checked ->
-            debugLogsEnabled = checked
-            appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
-            updateDebugOverlays()
-        }
+    private fun buildLowLatencySettingsSection(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(
+            settingsSwitchRow(
+                label = "Qualcomm low-latency decoder",
+                checked = videoLowLatencyEnabled,
+                description = "Request priority, 60 fps operating rate, and low-latency decode",
+            ) { checked ->
+                videoLowLatencyEnabled = checked
+                updateResolutionMenu()
+            },
+        )
+        addView(
+            settingsSwitchRow(
+                label = "Stable video clock",
+                checked = stableVideoTimestampsEnabled,
+                description = "Feed evenly spaced timestamps to avoid Qualcomm FPS stalls",
+            ) { checked ->
+                stableVideoTimestampsEnabled = checked
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+        addView(
+            settingsSwitchRow(
+                label = "Preserve predictive video frames",
+                checked = preserveVideoFramesEnabled,
+                description = "Wait for decoder input instead of corrupting HEVC reference chains",
+            ) { checked ->
+                preserveVideoFramesEnabled = checked
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+        addView(
+            settingsSwitchRow(
+                label = "Low-latency audio",
+                checked = audioLowLatencyEnabled,
+                description = "Use a smaller AudioTrack buffer and Android low-latency mode",
+            ) { checked ->
+                audioLowLatencyEnabled = checked
+                updateResolutionMenu()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+    }
+
+    private fun buildDebugLogsSection(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(
+            settingsSwitchRow(
+                label = "Performance statistics",
+                checked = performanceStatsEnabled,
+                description = "Show decoder FPS, queue depth, totals, and wait count",
+            ) { checked ->
+                performanceStatsEnabled = checked
+                updateDebugOverlays()
+            },
+        )
+        addView(
+            settingsSwitchRow(
+                label = "Debug logs",
+                checked = debugLogsEnabled,
+                description = "Show on-screen lifecycle and protocol logs",
+            ) { checked ->
+                debugLogsEnabled = checked
+                appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
+                updateDebugOverlays()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+        addView(
+            settingsSwitchRow(
+                label = "Full packet trace",
+                checked = protocolTraceEnabled,
+                description = "Write RTSP/HID packet bodies to the log; may increase touch latency",
+            ) { checked ->
+                protocolTraceEnabled = checked
+                appendLog("Full packet trace ${if (checked) "enabled" else "disabled"}")
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
+    }
 
     private fun buildStepSliderSection(
         title: String,
@@ -2505,6 +2649,14 @@ class CarPlayHostActivity : ComponentActivity() {
             append("Driving side: ").append(if (rightHandDrive) "right" else "left").append('\n')
             append("Fullscreen: ").append(fullscreen).append('\n')
             append("Video transport: ").append(transport).append('\n')
+            append("Low-latency decoder: ")
+                .append(if (videoLowLatencyEnabled) "enabled" else "disabled").append('\n')
+            append("Stable video clock: ")
+                .append(if (stableVideoTimestampsEnabled) "enabled" else "disabled").append('\n')
+            append("Predictive-frame preservation: ")
+                .append(if (preserveVideoFramesEnabled) "enabled" else "disabled").append('\n')
+            append("Low-latency audio: ")
+                .append(if (audioLowLatencyEnabled) "enabled" else "disabled").append('\n')
             append("Location reporting: ")
                 .append(if (locationReportingEnabled) "enabled" else "disabled")
                 .append('\n')
@@ -2553,6 +2705,7 @@ class CarPlayHostActivity : ComponentActivity() {
             model = normalizedModel(),
             oemLabel = oemLabel,
             icons = listOf(loadAirPlayIcon()),
+            protocolTraceEnabled = protocolTraceEnabled,
         )
     }
 
@@ -2711,8 +2864,15 @@ class CarPlayHostActivity : ComponentActivity() {
         videoHeight = videoHeight,
         preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
         advancedAudioChannelMapping = advancedAudioChannelMapping,
+        videoLowLatencyEnabled = videoLowLatencyEnabled,
+        stableVideoTimestampsEnabled = stableVideoTimestampsEnabled,
+        preserveVideoFramesEnabled = preserveVideoFramesEnabled,
+        audioLowLatencyEnabled = audioLowLatencyEnabled,
         onScreenStreamActiveChanged = { type, active ->
             onScreenStreamStateChanged(controllerGeneration, type, active)
+        },
+        onPerformanceStats = { stats ->
+            onMediaPerformanceStats(controllerGeneration, stats)
         },
     )
 
@@ -3222,7 +3382,29 @@ class CarPlayHostActivity : ComponentActivity() {
                 activeScreenStreamTypes.add(type)
             } else {
                 activeScreenStreamTypes.remove(type)
+                if (activeScreenStreamTypes.isEmpty()) performanceStatsView?.text = ""
             }
+            updateDebugOverlays()
+        }
+    }
+
+    private fun onMediaPerformanceStats(
+        generation: Int,
+        stats: MediaPerformanceStats,
+    ) {
+        runOnUiThread {
+            if (shuttingDown.get() || generation != restartGeneration) return@runOnUiThread
+            val decoder = stats.decoderName.substringAfterLast('.').take(24)
+            performanceStatsView?.text = String.format(
+                Locale.US,
+                "%s  %.1f fps\nqueue %d  waits %d\nin %,d  out %,d",
+                decoder,
+                stats.renderedFps,
+                stats.queueDepth,
+                stats.decoderWaits,
+                stats.receivedFrames,
+                stats.renderedFrames,
+            )
             updateDebugOverlays()
         }
     }
@@ -3243,6 +3425,11 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun updateDebugOverlays() {
         val showLogs = debugLogsEnabled && !menuOpen
         statusScrollView?.visibility = if (showLogs) View.VISIBLE else View.GONE
+        val showStats = performanceStatsEnabled &&
+            !menuOpen &&
+            activeScreenStreamTypes.isNotEmpty() &&
+            !performanceStatsView?.text.isNullOrEmpty()
+        performanceStatsView?.visibility = if (showStats) View.VISIBLE else View.GONE
         val showStage = !debugLogsEnabled &&
             !menuOpen &&
             activeScreenStreamTypes.isEmpty()
