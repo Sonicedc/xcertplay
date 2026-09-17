@@ -14,11 +14,13 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.os.PowerManager
 import android.util.Log
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayContact
@@ -151,6 +153,8 @@ class CarPlayController(
 
     private val appContext = context.applicationContext
     private val usbManager = context.getSystemService(UsbManager::class.java)
+    private val wifiManager = appContext.getSystemService(WifiManager::class.java)
+    private val powerManager = appContext.getSystemService(PowerManager::class.java)
     private val bluetoothAdapter =
         appContext.getSystemService(BluetoothManager::class.java)?.adapter
     private val iphoneHost = IphoneUsbHost(
@@ -202,6 +206,9 @@ class CarPlayController(
     private val wirelessTunnelReady = AtomicBoolean(false)
     private val wirelessActiveReported = AtomicBoolean(false)
     private val wirelessGeneration = AtomicInteger(0)
+    private var wifiPerformanceLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
+    private var cpuWakeLock: PowerManager.WakeLock? = null
 
     private var permissionCloseable: Closeable? = null
     private var attachCloseable: Closeable? = null
@@ -306,6 +313,7 @@ class CarPlayController(
     fun start() {
         synchronized(this) {
             if (closed) return
+            acquirePerformanceLocks()
         }
         if (config.transport == CarPlayTransport.WIRED) {
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
@@ -410,6 +418,7 @@ class CarPlayController(
                     wirelessAirPlayEndpoint = null
                     closeBestEffort("location provider") { locationProvider?.close() }
                 } finally {
+                    releasePerformanceLocks()
                     executor.shutdownNow()
                     try {
                         executor.awaitTermination(EXECUTOR_CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
@@ -1496,6 +1505,54 @@ class CarPlayController(
         }
     }
 
+    private fun acquirePerformanceLocks() {
+        if (wifiPerformanceLock?.isHeld != true) {
+            wifiPerformanceLock = wifiManager?.createWifiLock(
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                WIFI_PERFORMANCE_LOCK_TAG,
+            )?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        if (multicastLock?.isHeld != true) {
+            multicastLock = wifiManager?.createMulticastLock(MULTICAST_LOCK_TAG)?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        if (cpuWakeLock?.isHeld != true) {
+            cpuWakeLock = powerManager?.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                CPU_WAKE_LOCK_TAG,
+            )?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        debugLog(
+            "performance locks wifi=${wifiPerformanceLock?.isHeld == true} " +
+                "multicast=${multicastLock?.isHeld == true} cpu=${cpuWakeLock?.isHeld == true}",
+        )
+    }
+
+    private fun releasePerformanceLocks() {
+        listOf(multicastLock, wifiPerformanceLock, cpuWakeLock).forEach { lock ->
+            try {
+                when (lock) {
+                    is WifiManager.MulticastLock -> if (lock.isHeld) lock.release()
+                    is WifiManager.WifiLock -> if (lock.isHeld) lock.release()
+                    is PowerManager.WakeLock -> if (lock.isHeld) lock.release()
+                }
+            } catch (_: RuntimeException) {
+                // Best effort during teardown.
+            }
+        }
+        multicastLock = null
+        wifiPerformanceLock = null
+        cpuWakeLock = null
+    }
+
     private fun createDirectRfcommSocket(device: BluetoothDevice, channel: Int): BluetoothSocket {
         val methods = listOf("createRfcommSocket", "createInsecureRfcommSocket")
         var lastFailure: Throwable? = null
@@ -1858,6 +1915,9 @@ class CarPlayController(
     }
 
     companion object {
+        private const val WIFI_PERFORMANCE_LOCK_TAG = "xcertplay:carplay-wifi"
+        private const val MULTICAST_LOCK_TAG = "xcertplay:carplay-multicast"
+        private const val CPU_WAKE_LOCK_TAG = "xcertplay:carplay-cpu"
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val IAP2_RFCOMM_CHANNEL = 1
         private const val VENDOR_RFCOMM_SERVICE_NAME = "xcertplay-iap2"

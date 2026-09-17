@@ -19,6 +19,7 @@ interface MediaSink {
     fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {}
     fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {}
     fun onAudioStopped(type: Int) {}
+    fun audioPlaybackSampleTime(type: Int): Long? = null
     fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {}
     fun onMicrophoneStopped(type: Int) {}
     fun onIapMessage(bytes: ByteArray) {}
@@ -243,13 +244,16 @@ class CarPlayMediaEngine(
             val originNs = meta.originNs
             if (firstSample != null && originNs != null) {
                 val nowNs = System.nanoTime()
-                val elapsedSec = Math.max(
-                    0.0,
-                    (nowNs - originNs) / 1e9 - meta.playoutLatencyMs / 1000.0,
-                )
-                val firstUnsigned = firstSample.toLong() and 0xffff_ffffL
-                val sampleTime = (firstUnsigned + Math.round(elapsedSec * meta.format.sampleRate)) and
-                    0xffff_ffffL
+                // Prefer the AudioTrack playback head over the sender's requested latency. The
+                // latter is commonly 1000 ms, but AndroidMediaSink deliberately starts after a
+                // small low-latency prebuffer; subtracting a second here falsely tells the phone
+                // that audio is far behind video and causes unstable source-side pacing.
+                val sampleTime = sink.audioPlaybackSampleTime(meta.type) ?: run {
+                    val elapsedSec = Math.max(0.0, (nowNs - originNs) / 1e9)
+                    val firstUnsigned = firstSample.toLong() and 0xffff_ffffL
+                    (firstUnsigned + Math.round(elapsedSec * meta.format.sampleRate)) and
+                        0xffff_ffffL
+                }
                 entry["streamConnectionID"] = unsignedPlistInteger(meta.connectionId ?: 0L)
                 entry["timestamp"] = session.syncedNtp()
                 entry["timestampRawNs"] = nowNs

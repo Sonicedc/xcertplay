@@ -92,7 +92,7 @@ class AndroidMediaSink(
     }
 
     override fun onAudioStarted(type: Int, format: AudioFormat, firstSample: Int) {
-        audioRenderer(type, format).start()
+        audioRenderer(type, format).start(firstSample)
     }
 
     override fun onAudioRtp(type: Int, format: AudioFormat, rtp: ByteArray, sample: Int) {
@@ -102,6 +102,9 @@ class AndroidMediaSink(
     override fun onAudioStopped(type: Int) {
         audioRenderers.remove(type)?.close()
     }
+
+    override fun audioPlaybackSampleTime(type: Int): Long? =
+        audioRenderers[type]?.playbackSampleTime()
 
     override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
         val uplink = microphoneUplinks.computeIfAbsent(type) { MicrophoneUplink(config) }
@@ -528,7 +531,8 @@ private class AudioRenderer(
     @Volatile private var running = true
     @Volatile private var started = false
     private var codec: MediaCodec? = null
-    private var track: AudioTrack? = null
+    @Volatile private var track: AudioTrack? = null
+    @Volatile private var firstSampleTime: Long? = null
     private var pcm = ByteArray(64 * 1024)
     private var playbackStarted = false
     private var prebufferBytes = 0
@@ -544,10 +548,19 @@ private class AudioRenderer(
     private var firstPcmLogged = false
     private val thread = Thread(::run, "carplay-audio").apply { isDaemon = true }
 
-    fun start() {
+    fun start(firstSample: Int) {
         if (started) return
+        firstSampleTime = firstSample.toLong() and 0xffff_ffffL
         started = true
         thread.start()
+    }
+
+    fun playbackSampleTime(): Long? {
+        val first = firstSampleTime ?: return null
+        val activeTrack = track ?: return null
+        if (!playbackStarted) return first
+        val playedFrames = activeTrack.playbackHeadPosition.toLong() and 0xffff_ffffL
+        return (first + playedFrames) and 0xffff_ffffL
     }
 
     fun submit(rtp: ByteArray, sample: Int) {

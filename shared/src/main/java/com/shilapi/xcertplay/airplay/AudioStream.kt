@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.airplay
 
+import android.os.Process
 import java.io.Closeable
 import java.io.IOException
 import java.net.DatagramPacket
@@ -50,6 +51,8 @@ class AudioStream(
     private var dataThread: Thread? = null
     private var controlThread: Thread? = null
     private var started = false
+    private var lastSequence: Int? = null
+    private val sequenceDiscontinuities = AtomicInteger()
 
     fun listen(listener: Listener): Pair<Int, Int> {
         val data = bindAnyPort()
@@ -76,6 +79,7 @@ class AudioStream(
     }
 
     private fun runData(socket: DatagramSocket, listener: Listener) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buffer = ByteArray(DATAGRAM_BYTES)
         while (!closed.get()) {
             val packet = DatagramPacket(buffer, buffer.size)
@@ -101,6 +105,15 @@ class AudioStream(
                 )
                 continue
             }
+
+            val sequence = ((wire[2].toInt() and 0xff) shl 8) or
+                (wire[3].toInt() and 0xff)
+            lastSequence?.let { previous ->
+                if (sequence != ((previous + 1) and 0xffff)) {
+                    sequenceDiscontinuities.incrementAndGet()
+                }
+            }
+            lastSequence = sequence
 
             val aad = wire.copyOfRange(4, RTP_HEADER_LEN)
             val sealedEnd = wire.size - NONCE_LEN
@@ -137,7 +150,8 @@ class AudioStream(
                 android.util.Log.i(
                     TAG,
                     "audio stream type=$streamType decrypted=$decryptedNumber " +
-                        "authFailures=${authenticationFailures.get()}",
+                        "authFailures=${authenticationFailures.get()} " +
+                        "rtpDiscontinuities=${sequenceDiscontinuities.get()}",
                 )
             }
             listener.onPacket(wire, rtp, sample, null)
@@ -150,6 +164,7 @@ class AudioStream(
     }
 
     private fun runControl(socket: DatagramSocket) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
         val buffer = ByteArray(DATAGRAM_BYTES)
         while (!closed.get()) {
             try {
@@ -163,6 +178,7 @@ class AudioStream(
     private fun bindAnyPort(): DatagramSocket {
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
+        socket.receiveBufferSize = AUDIO_RECEIVE_BUFFER_BYTES
         socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         return socket
     }
@@ -185,6 +201,7 @@ class AudioStream(
         const val TAIL_LEN = TAG_LEN + NONCE_LEN
         const val FIRST_PACKET_LOG_COUNT = 3
         const val PACKET_LOG_INTERVAL = 100
+        const val AUDIO_RECEIVE_BUFFER_BYTES = 256 * 1024
     }
 }
 
