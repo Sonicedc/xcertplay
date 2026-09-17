@@ -7,6 +7,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.AudioCodecKind
@@ -18,6 +19,7 @@ import com.shilapi.xcertplay.airplay.toHexString
 import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 
@@ -29,6 +31,8 @@ data class MediaPerformanceStats(
     val renderedFps: Double,
     val queueDepth: Int,
     val decoderWaits: Long,
+    val queueLatencyMs: Double,
+    val decoderLatencyMs: Double,
 )
 
 /**
@@ -147,7 +151,7 @@ class AndroidMediaSink(
 
 private sealed interface VideoJob {
     data class Config(val codec: VideoCodec, val codecData: ByteArray) : VideoJob
-    data class Frame(val nalus: ByteArray) : VideoJob
+    data class Frame(val nalus: ByteArray, val enqueuedAtNs: Long) : VideoJob
     data class SurfaceChanged(val surface: Surface?) : VideoJob
 }
 
@@ -178,6 +182,9 @@ private class VideoDecoder(
     private var decoderWaits = 0L
     private var statsWindowStartNs = System.nanoTime()
     private var decoderName = "not-configured"
+    private var queueLatencyMs = 0.0
+    private var decoderLatencyMs = 0.0
+    private val decoderSubmissionTimes = ArrayDeque<Long>()
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true; start() }
 
     fun configure(codec: VideoCodec, codecData: ByteArray) {
@@ -186,7 +193,7 @@ private class VideoDecoder(
 
     fun submit(nalus: ByteArray) {
         receivedFrames++
-        queue.offer(VideoJob.Frame(nalus))
+        queue.offer(VideoJob.Frame(nalus, System.nanoTime()))
     }
 
     fun setSurface(surface: Surface?) {
@@ -199,13 +206,14 @@ private class VideoDecoder(
     }
 
     private fun run() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
         try {
             while (running) {
                 val job = queue.take()
                 try {
                     when (job) {
                         is VideoJob.Config -> configureDecoder(job)
-                        is VideoJob.Frame -> feed(job.nalus)
+                        is VideoJob.Frame -> feed(job)
                         is VideoJob.SurfaceChanged -> changeSurface(job.surface)
                     }
                 } catch (error: Exception) {
@@ -246,6 +254,9 @@ private class VideoDecoder(
             if (lowLatencyEnabled) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_FRAME_RATE, TARGET_VIDEO_FRAME_RATE)
+                // Android 10 does not expose MediaFormat.KEY_LOW_LATENCY, although Qualcomm's
+                // decoder on this head unit accepts the underlying platform key.
+                setInteger(LOW_LATENCY_KEY, 1)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     setFloat(MediaFormat.KEY_OPERATING_RATE, TARGET_VIDEO_FRAME_RATE.toFloat())
                 }
@@ -264,6 +275,9 @@ private class VideoDecoder(
         }
         val next = try {
             createDecoder(mime).also {
+                if (lowLatencyEnabled && it.name.contains("qcom", ignoreCase = true)) {
+                    format.setInteger(QTI_LOW_LATENCY_KEY, 1)
+                }
                 it.configure(format, surface, null, 0)
                 it.start()
             }
@@ -279,6 +293,9 @@ private class VideoDecoder(
         renderedFrames = 0L
         renderedFramesAtWindowStart = 0L
         decoderWaits = 0L
+        queueLatencyMs = 0.0
+        decoderLatencyMs = 0.0
+        decoderSubmissionTimes.clear()
         statsWindowStartNs = System.nanoTime()
         if (next != null) {
             decoderName = next.name
@@ -330,14 +347,15 @@ private class VideoDecoder(
         lastConfig?.let(::configureDecoder)
     }
 
-    private fun feed(nalus: ByteArray) {
+    private fun feed(frame: VideoJob.Frame) {
         val codec = decoder ?: return
-        val annexB = MediaCodecSupport.toAnnexB(nalus)
+        updateQueueLatency((System.nanoTime() - frame.enqueuedAtNs) / 1_000_000.0)
+        val annexB = MediaCodecSupport.toAnnexB(frame.nalus)
         if (!submittedFrameLogged) {
             submittedFrameLogged = true
             Log.i(
                 TAG,
-                "video decoder first input avcc=${nalus.size} annexB=${annexB.size} " +
+                "video decoder first input avcc=${frame.nalus.size} annexB=${annexB.size} " +
                     "head=${annexB.take(16).joinToString("") { "%02x".format(it.toInt() and 0xff) }}",
             )
         }
@@ -371,6 +389,7 @@ private class VideoDecoder(
                 System.nanoTime() / 1000
             }
             codec.queueInputBuffer(index, 0, annexB.size, presentationTimeUs, 0)
+            decoderSubmissionTimes.addLast(System.nanoTime())
         } else {
             codec.queueInputBuffer(index, 0, 0, 0, 0)
             throw IOException(
@@ -391,6 +410,9 @@ private class VideoDecoder(
                     val render = outputSurface != null
                     codec.releaseOutputBuffer(index, render)
                     if (render) {
+                        decoderSubmissionTimes.pollFirst()?.let { submittedAt ->
+                            updateDecoderLatency((System.nanoTime() - submittedAt) / 1_000_000.0)
+                        }
                         renderedFrames++
                         emitPerformanceStats()
                         if (!renderedFrameLogged) {
@@ -420,10 +442,20 @@ private class VideoDecoder(
                 renderedFps = windowFrames * 1_000_000_000.0 / elapsedNs,
                 queueDepth = queue.size,
                 decoderWaits = decoderWaits,
+                queueLatencyMs = queueLatencyMs,
+                decoderLatencyMs = decoderLatencyMs,
             ),
         )
         renderedFramesAtWindowStart = renderedFrames
         statsWindowStartNs = now
+    }
+
+    private fun updateQueueLatency(sampleMs: Double) {
+        queueLatencyMs = if (queueLatencyMs == 0.0) sampleMs else queueLatencyMs * 0.8 + sampleMs * 0.2
+    }
+
+    private fun updateDecoderLatency(sampleMs: Double) {
+        decoderLatencyMs = if (decoderLatencyMs == 0.0) sampleMs else decoderLatencyMs * 0.8 + sampleMs * 0.2
     }
 
     private fun logOutputFormat(format: MediaFormat) {
@@ -445,6 +477,7 @@ private class VideoDecoder(
         val codec = decoder
         decoder = null
         nextPresentationTimeUs = 0L
+        decoderSubmissionTimes.clear()
         if (codec != null) {
             try {
                 codec.stop()
@@ -466,6 +499,8 @@ private class VideoDecoder(
         const val TARGET_VIDEO_FRAME_RATE = 60
         const val VIDEO_FRAME_DURATION_US = 1_000_000L / TARGET_VIDEO_FRAME_RATE
         const val STATS_INTERVAL_NS = 1_000_000_000L
+        const val LOW_LATENCY_KEY = "low-latency"
+        const val QTI_LOW_LATENCY_KEY = "vendor.qti-ext-dec-low-latency.enable"
         val START_CODE = byteArrayOf(0x00, 0x00, 0x00, 0x01)
     }
 }
@@ -530,6 +565,7 @@ private class AudioRenderer(
     }
 
     private fun run() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         try {
             when (format.codec) {
                 AudioCodecKind.AAC_LC -> configureCodec(MediaFormat.MIMETYPE_AUDIO_AAC)

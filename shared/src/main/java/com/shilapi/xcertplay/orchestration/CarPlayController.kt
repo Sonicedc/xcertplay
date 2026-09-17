@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayContact
@@ -70,6 +71,7 @@ import java.io.Closeable
 import java.io.IOException
 import java.net.InetAddress
 import java.net.Inet6Address
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -170,6 +172,9 @@ class CarPlayController(
     @Volatile private var uiListener: AirPlaySessionListener? = listener
     @Volatile private var uiStatusReporter: ((CarPlayStatus) -> Unit)? = reportStatus
     private val permissionGrant = AtomicBoolean(false)
+    private val touchQueueLock = Any()
+    private val pendingTouches = ArrayDeque<List<AirPlayContact>>()
+    private val touchDrainScheduled = AtomicBoolean(false)
     private val availabilityPollGeneration = AtomicInteger(0)
     private var permissionPollGeneration = 0
     private var reenumerationAttempts = 0
@@ -329,15 +334,47 @@ class CarPlayController(
     }
 
     fun sendTouch(contacts: List<AirPlayContact>): Boolean {
-        if (closed) return false
-        val session = activeSession ?: return false
+        if (closed || activeSession == null) return false
+        val snapshot = contacts.toList()
+        synchronized(touchQueueLock) {
+            val tail = pendingTouches.peekLast()
+            if (tail != null && tail.hasSameContactState(snapshot)) {
+                // MotionEvents can arrive faster than the encrypted AirPlay event channel can
+                // flush them. Keep only the newest coordinates for equivalent MOVE reports, but
+                // never discard DOWN/UP transitions or reorder them around a move.
+                pendingTouches.removeLast()
+            }
+            pendingTouches.addLast(snapshot)
+        }
+        return scheduleTouchDrain()
+    }
+
+    private fun scheduleTouchDrain(): Boolean {
+        if (!touchDrainScheduled.compareAndSet(false, true)) return true
         return try {
-            touchExecutor.execute { session.sendTouch(contacts) }
+            touchExecutor.execute(::drainLatestTouches)
             true
         } catch (_: Exception) {
+            touchDrainScheduled.set(false)
             false
         }
     }
+
+    private fun drainLatestTouches() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
+        while (!closed) {
+            val contacts = synchronized(touchQueueLock) { pendingTouches.pollFirst() } ?: break
+            activeSession?.sendTouch(contacts)
+        }
+        touchDrainScheduled.set(false)
+        val hasPending = synchronized(touchQueueLock) { pendingTouches.isNotEmpty() }
+        if (!closed && hasPending) scheduleTouchDrain()
+    }
+
+    private fun List<AirPlayContact>.hasSameContactState(other: List<AirPlayContact>): Boolean =
+        size == other.size && indices.all { index ->
+            this[index].id == other[index].id && this[index].down == other[index].down
+        }
 
     override fun close() {
         synchronized(this) {
@@ -349,6 +386,7 @@ class CarPlayController(
         wirelessGeneration.incrementAndGet()
         permissionPollGeneration += 1
         touchExecutor.shutdownNow()
+        synchronized(touchQueueLock) { pendingTouches.clear() }
         tunnelExecutor.shutdownNow()
         val service = vpnService
         unbindVpn()

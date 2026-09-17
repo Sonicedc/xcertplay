@@ -648,6 +648,11 @@ class CarPlayHostActivity : ComponentActivity() {
                 setColor(Color.argb(170, 0, 0, 0))
             }
             visibility = View.GONE
+            contentDescription = "CarPlay performance statistics; long press for settings"
+            setOnLongClickListener {
+                openSettingsMenu()
+                true
+            }
         }
         val statusParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -3331,7 +3336,12 @@ class CarPlayHostActivity : ComponentActivity() {
                     gestureSequenceActive = false
                     gestureTracking = false
                 } else if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) {
+                    // Some automotive touch drivers do not deliver enough MOVE distance for a
+                    // three-finger swipe. Treat a completed three-finger tap as the same settings
+                    // gesture so the menu remains reachable on those panels.
+                    gestureSequenceActive = false
                     gestureTracking = false
+                    openSettingsMenu()
                 }
                 return true
             }
@@ -3397,10 +3407,12 @@ class CarPlayHostActivity : ComponentActivity() {
             val decoder = stats.decoderName.substringAfterLast('.').take(24)
             performanceStatsView?.text = String.format(
                 Locale.US,
-                "%s  %.1f fps\nqueue %d  waits %d\nin %,d  out %,d",
+                "%s  %.1f fps\nqueue %d / %.1f ms  decode %.1f ms\nwaits %d  in %,d  out %,d",
                 decoder,
                 stats.renderedFps,
                 stats.queueDepth,
+                stats.queueLatencyMs,
+                stats.decoderLatencyMs,
                 stats.decoderWaits,
                 stats.receivedFrames,
                 stats.renderedFrames,
@@ -3549,8 +3561,8 @@ class CarPlayHostActivity : ComponentActivity() {
         const val AUDIO_CAPTURE_DIRECTORY = "audio-captures"
         const val PROTOCOL_TRACE_PREFIX = "TRACE "
         const val THREE_FINGER_COUNT = 3
-        const val THREE_FINGER_SWIPE_DISTANCE_DP = 72
-        const val THREE_FINGER_SWIPE_DIRECTION_RATIO = 1.15f
+        const val THREE_FINGER_SWIPE_DISTANCE_DP = 36
+        const val THREE_FINGER_SWIPE_DIRECTION_RATIO = 0.65f
         const val MAX_SETTINGS_MENU_WIDTH_PX = 1200
         val MENU_BACKGROUND = Color.rgb(12, 16, 19)
         val MENU_SECONDARY = Color.rgb(170, 180, 190)

@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.util.Log
+import android.os.Process
 import java.io.Closeable
 import java.io.InputStream
 import java.net.InetAddress
@@ -53,8 +54,11 @@ class ScreenStream(private val key: ByteArray) : Closeable {
     }
 
     private fun accept(bound: ServerSocket) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
         try {
             val accepted = bound.accept()
+            accepted.tcpNoDelay = true
+            accepted.receiveBufferSize = SCREEN_RECEIVE_BUFFER_BYTES
             socket = accepted
             run(accepted)
         } catch (error: Exception) {
@@ -128,6 +132,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
         const val OP_VIDEO_FRAME = 0
         const val OP_VIDEO_CONFIG = 1
         const val MAX_BODY = 8 * 1024 * 1024
+        const val SCREEN_RECEIVE_BUFFER_BYTES = 512 * 1024
     }
 }
 
