@@ -1,7 +1,11 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
+import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
+import com.shilapi.xcertplay.iap2.message.Iap2WirelessSessionParameters
+import com.shilapi.xcertplay.iap2.session.Iap2Session
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
-import java.io.ByteArrayOutputStream
 import kotlin.math.min
 
 /**
@@ -9,11 +13,11 @@ import kotlin.math.min
  * Identification, MFi, the five update subscriptions, then Wi-Fi credentials and the
  * 0x4E0D/0x4E0E Wireless CarPlay transport notifications.
  *
- * The caller retains ownership of [channel]. While [run] is active it is the only receiver and
+ * The caller retains ownership of [session]. While [run] is active it is the only receiver and
  * forwards each non-control CSM frame to [onIncoming].
  */
 class Iap2WirelessControlClient(
-    private val channel: Iap2CsmChannel,
+    private val session: Iap2Session,
     private val mfi: Iap2MfiAuthenticationClient,
 ) {
     fun run(
@@ -22,7 +26,7 @@ class Iap2WirelessControlClient(
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         locationProvider: Iap2LocationProvider? = null,
         onReady: () -> Unit = {},
-        onIncoming: (CsmFrame) -> Unit = {},
+        onIncoming: (Iap2Frame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WirelessControlResult {
         require(identification.wireless != null) {
@@ -37,11 +41,11 @@ class Iap2WirelessControlClient(
         } else {
             deadlineAfter(timeoutMillis)
         }
-        Iap2IdentificationClient(channel).identify(identification, requireRemaining(deadlineNanos))
+        Iap2IdentificationClient(session).identify(identification, requireRemaining(deadlineNanos))
         onProgress("iap2 identification accepted")
         var stage = Iap2WirelessControlStage.IDENTIFIED
 
-        mfi.run(channel, requireRemaining(deadlineNanos), onProgress)
+        mfi.run(session, requireRemaining(deadlineNanos), onProgress)
         stage = Iap2WirelessControlStage.AUTHENTICATED
         onProgress("iap2 authentication accepted")
 
@@ -58,7 +62,7 @@ class Iap2WirelessControlClient(
         var preTransportWiFiConfigurationsSent = 0
         var postTransportWiFiConfigurationsSent = 0
         var transportNotificationSeen = false
-        var wirelessCarPlayConnectingSeen = false
+        var wirelessCarPlayAvailableSeen = false
         var locationActive = false
         var locationSentLogged = false
         while (true) {
@@ -72,7 +76,7 @@ class Iap2WirelessControlClient(
                         carPlayStartSessionsSent,
                         transportNotificationSeen,
                         postTransportWiFiConfigurationsSent,
-                        wirelessCarPlayConnectingSeen,
+                        wirelessCarPlayAvailableSeen,
                     )
                 }
                 if (locationActive && sendLatestLocation(locationProvider, deadlineNanos) && !locationSentLogged) {
@@ -84,9 +88,9 @@ class Iap2WirelessControlClient(
                 } else {
                     remaining
                 }
-                val incoming = channel.recv(pollTimeout)
+                val incoming = session.recv(pollTimeout)
                 if (incoming == null) {
-                    if (channel.isClosed) {
+                    if (session.isClosed) {
                         return Iap2WirelessControlResult(
                             Iap2WirelessControlTerminal.CHANNEL_CLOSED,
                             stage,
@@ -95,7 +99,7 @@ class Iap2WirelessControlClient(
                             carPlayStartSessionsSent,
                             transportNotificationSeen,
                             postTransportWiFiConfigurationsSent,
-                            wirelessCarPlayConnectingSeen,
+                            wirelessCarPlayAvailableSeen,
                         )
                     }
                     if (remainingMillis(deadlineNanos) == 0L) {
@@ -107,7 +111,7 @@ class Iap2WirelessControlClient(
                             carPlayStartSessionsSent,
                             transportNotificationSeen,
                             postTransportWiFiConfigurationsSent,
-                            wirelessCarPlayConnectingSeen,
+                            wirelessCarPlayAvailableSeen,
                         )
                     }
                     continue
@@ -160,19 +164,19 @@ class Iap2WirelessControlClient(
                     }
 
                     WIRELESS_CARPLAY_UPDATE -> {
-                        val status = wirelessCarPlayUpdateStatus(incoming)
-                        if (status == 1) wirelessCarPlayConnectingSeen = true
-                        onProgress(
-                            "iap2 rx=0x4e0d wireless-carplay-update " +
-                                "status=${wirelessCarPlayStatusName(status)}",
-                        )
+                        val available = Iap2WirelessMessages.wirelessCarPlayAvailability(incoming)
+                        if (available) wirelessCarPlayAvailableSeen = true
+                        onProgress("iap2 rx=0x4e0d wireless-carplay-update available=$available")
                     }
 
                     DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION -> {
                         transportNotificationSeen = true
+                        val identifiers = Iap2WirelessMessages.deviceTransportIdentifier(incoming)
                         stage = later(stage, Iap2WirelessControlStage.TRANSPORT_NOTIFIED)
                         onProgress(
-                            "iap2 rx=0x4e0e device-transport-identifier; " +
+                            "iap2 rx=0x4e0e device-transport-identifier " +
+                                "bluetooth=${identifiers.bluetoothMac ?: "none"} " +
+                                "usb=${identifiers.usbTransportIdentifier ?: "none"}; " +
                                 "resending 0x5703",
                         )
                         if (
@@ -223,8 +227,8 @@ class Iap2WirelessControlClient(
         }
     }
 
-    private fun send(frame: CsmFrame, deadlineNanos: Long) {
-        channel.send(frame, requireRemaining(deadlineNanos))
+    private fun send(frame: Iap2Frame, deadlineNanos: Long) {
+        session.send(frame, requireRemaining(deadlineNanos))
     }
 
     private fun sendLatestLocation(
@@ -232,7 +236,7 @@ class Iap2WirelessControlClient(
         deadlineNanos: Long,
     ): Boolean {
         val sentence = provider?.latestNmea() ?: return false
-        channel.send(
+        session.send(
             Iap2LocationMessages.locationInformation(sentence),
             requireRemaining(deadlineNanos),
         )
@@ -270,79 +274,30 @@ class Iap2WirelessControlClient(
         private const val MAX_POST_TRANSPORT_WIFI_CONFIGURATION_SENDS = 2
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
-        /** Exact LIVI 0x5703 flat Wi-Fi credential payload. */
-        fun accessoryWiFiConfiguration(endpoint: Iap2WirelessCarPlayEndpoint): CsmFrame =
-            frame(
-                ACCESSORY_WIFI_CONFIGURATION,
-                Iap2CsmParameter(1, nulTerminated(endpoint.ssid)),
-                Iap2CsmParameter(2, nulTerminated(endpoint.passphrase)),
-                Iap2CsmParameter(3, byteArrayOf(endpoint.security.wireValue.toByte())),
-                Iap2CsmParameter(4, byteArrayOf(endpoint.channel.toByte())),
+        /** Reference-compatible 0x5703 body. BSSID is omitted when the platform does not expose it. */
+        fun accessoryWiFiConfiguration(endpoint: Iap2WirelessCarPlayEndpoint): Iap2Frame =
+            Iap2WirelessMessages.accessoryWiFiConfiguration(
+                ssid = endpoint.ssid,
+                passphrase = endpoint.passphrase,
+                channel = endpoint.channel,
+                securityType = endpoint.security.wireValue,
             )
 
         /** Wireless 0x4301 reply carrying the receiver address, port and pairing identity. */
-        fun carPlayStartSession(endpoint: Iap2WirelessCarPlayEndpoint): CsmFrame {
-            val wireless = Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, nulTerminated(endpoint.ssid)),
-                    Iap2CsmParameter(1, nulTerminated(endpoint.passphrase)),
-                    Iap2CsmParameter(2, byteArrayOf(endpoint.channel.toByte())),
-                    Iap2CsmParameter(3, nulTerminatedList(endpoint.ipAddresses)),
-                    Iap2CsmParameter(4, byteArrayOf(endpoint.security.wireValue.toByte())),
+        fun carPlayStartSession(endpoint: Iap2WirelessCarPlayEndpoint): Iap2Frame =
+            Iap2CarPlayMessages.startSession(
+                wireless = Iap2WirelessSessionParameters(
+                    ssid = endpoint.ssid,
+                    passphrase = endpoint.passphrase,
+                    channel = endpoint.channel,
+                    ipAddresses = endpoint.ipAddresses,
+                    securityType = endpoint.security.wireValue,
                 ),
+                airPlayPort = endpoint.airPlayPort,
+                deviceIdentifier = endpoint.deviceIdentifier,
+                publicKey = endpoint.publicKey,
+                sourceVersion = endpoint.sourceVersion,
             )
-            return frame(
-                CARPLAY_START_SESSION,
-                Iap2CsmParameter(1, wireless),
-                Iap2CsmParameter(2, u32(endpoint.airPlayPort)),
-                Iap2CsmParameter(3, nulTerminated(endpoint.deviceIdentifier)),
-                Iap2CsmParameter(4, nulTerminated(endpoint.publicKey)),
-                Iap2CsmParameter(5, nulTerminated(endpoint.sourceVersion)),
-            )
-        }
-
-        internal fun wirelessCarPlayUpdateStatus(frame: CsmFrame): Int? {
-            if (frame.messageId != WIRELESS_CARPLAY_UPDATE) return null
-            return try {
-                Iap2CsmParameters.parse(frame.payload)
-                    .firstOrNull { it.id == 0 }
-                    ?.payload
-                    ?.firstOrNull()
-                    ?.toInt()
-                    ?.and(0xff)
-            } catch (_: IphoneUsbException.Protocol) {
-                null
-            }
-        }
-
-        internal fun wirelessCarPlayStatusName(status: Int?): String = when (status) {
-            0 -> "idle"
-            1 -> "connecting"
-            2 -> "connected"
-            3 -> "error"
-            4 -> "disconnecting"
-            5 -> "disconnected"
-            null -> "unavailable"
-            else -> "unknown($status)"
-        }
-
-        private fun frame(messageId: Int, vararg parameters: Iap2CsmParameter): CsmFrame =
-            CsmFrame(messageId, Iap2CsmParameters.encode(parameters.asList()))
-
-        private fun nulTerminated(value: String): ByteArray = value.encodeToByteArray() + byteArrayOf(0)
-
-        private fun nulTerminatedList(values: List<String>): ByteArray {
-            val output = ByteArrayOutputStream()
-            for (value in values) output.write(nulTerminated(value))
-            return output.toByteArray()
-        }
-
-        private fun u32(value: Int): ByteArray = byteArrayOf(
-            (value ushr 24).toByte(),
-            (value ushr 16).toByte(),
-            (value ushr 8).toByte(),
-            value.toByte(),
-        )
 
         private fun later(
             current: Iap2WirelessControlStage,
@@ -436,5 +391,5 @@ data class Iap2WirelessControlResult(
     val carPlayStartSessionsSent: Int,
     val transportNotificationSeen: Boolean,
     val postTransportWiFiConfigurationsSent: Int,
-    val wirelessCarPlayConnectingSeen: Boolean,
+    val wirelessCarPlayAvailableSeen: Boolean,
 )

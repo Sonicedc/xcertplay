@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.body.Iap2BodyReader
+import com.shilapi.xcertplay.iap2.wire.Iap2ParameterList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -14,7 +16,7 @@ class Iap2LocationClientTest {
         val frame = Iap2LocationMessages.locationInformation("\$GPGGA")
 
         assertEquals(Iap2LocationMessages.LOCATION_INFORMATION, frame.messageId)
-        val parameter = Iap2CsmParameters.parse(frame.payload).single()
+        val parameter = Iap2BodyReader.of(frame).list().single()
         assertEquals(0, parameter.id)
         assertTrue(parameter.payload.contentEquals("\$GPGGA\u0000".encodeToByteArray()))
     }
@@ -49,10 +51,10 @@ class Iap2LocationClientTest {
         val base = wiredIdentification(locationInformationEnabled = false)
         val enabled = wiredIdentification(locationInformationEnabled = true)
 
-        val baseParameters = Iap2CsmParameters.parse(
+        val baseParameters = parameters(
             Iap2IdentificationClient.identificationInformation(base).payload,
         )
-        val enabledParameters = Iap2CsmParameters.parse(
+        val enabledParameters = parameters(
             Iap2IdentificationClient.identificationInformation(enabled).payload,
         )
 
@@ -62,7 +64,7 @@ class Iap2LocationClientTest {
 
         val component = enabledParameters.single { it.id == 22 }
         assertNotNull(component)
-        val fields = Iap2CsmParameters.parse(component.payload)
+        val fields = parameters(component.payload)
         assertTrue(fields.single { it.id == 0 }.payload.contentEquals(byteArrayOf(0, 0)))
         assertTrue(fields.single { it.id == 1 }.payload.contentEquals("xcertplay\u0000".encodeToByteArray()))
         assertTrue(fields.any { it.id == 17 && it.payload.isEmpty() })
@@ -81,7 +83,7 @@ class Iap2LocationClientTest {
             ),
         )
 
-        val parameters = Iap2CsmParameters.parse(
+        val parameters = parameters(
             Iap2IdentificationClient.identificationInformation(config).payload,
         )
         val sent = u16Values(parameters.single { it.id == 6 }.payload)
@@ -110,6 +112,8 @@ class Iap2LocationClientTest {
             ((bytes[index * 2].toInt() and 0xff) shl 8) or
                 (bytes[index * 2 + 1].toInt() and 0xff)
         }
+
+    private fun parameters(bytes: ByteArray) = Iap2ParameterList.parse(bytes).asList()
 
     private fun checksum(body: String): String {
         var value = 0

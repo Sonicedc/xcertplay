@@ -1,43 +1,10 @@
-package com.shilapi.xcertplay.transport
-
-/**
- * One decoded iAP2 Control Session Message (CSM).
- *
- * [payload] is the message body after the six-byte CSM header. Both input and output byte arrays
- * are copied so a frame remains stable while it waits for the next protocol stage.
- */
-class CsmFrame(messageId: Int, payload: ByteArray) {
-    val messageId: Int
-    private val body: ByteArray
-
-    init {
-        require(messageId in 0..0xffff) { "CSM message id must fit in u16" }
-        require(payload.size <= Iap2CsmFramer.MAX_FRAME_BYTES - Iap2CsmFramer.HEADER_BYTES) {
-            "CSM payload exceeds ${Iap2CsmFramer.MAX_FRAME_BYTES - Iap2CsmFramer.HEADER_BYTES} bytes"
-        }
-        this.messageId = messageId
-        body = payload.copyOf()
-    }
-
-    /** A defensive copy of the payload, excluding the CSM header. */
-    val payload: ByteArray get() = body.copyOf()
-
-    /** A defensive copy of this frame's complete six-byte-header CSM encoding. */
-    fun encodedFrame(): ByteArray = Iap2CsmFramer.encodeFrame(messageId, body)
-
-    override fun equals(other: Any?): Boolean =
-        other is CsmFrame && messageId == other.messageId && body.contentEquals(other.body)
-
-    override fun hashCode(): Int = 31 * messageId + body.contentHashCode()
-
-    override fun toString(): String = "CsmFrame(messageId=0x${messageId.toString(16).padStart(4, '0')}, payload=${body.size} bytes)"
-}
+package com.shilapi.xcertplay.iap2.wire
 
 /**
  * Pure CSM framing for iAP2 control-session bytes.
  *
- * CSM is `0x4040 | u16 length | u16 messageId | payload`, big-endian and without a checksum.
- * The retained receive data is bounded to one largest-valid frame. This object deliberately has no
+ * CSM is `0x4040 | u16 length | u16 messageId | body`, big-endian and without a checksum.
+ * The retained receive data is bounded to one largest-valid frame. This class deliberately has no
  * threading, I/O, link-engine, or message-specific knowledge.
  */
 class Iap2CsmFramer {
@@ -49,10 +16,10 @@ class Iap2CsmFramer {
      * It tolerates arbitrary transport chunking, concatenated frames, garbage before `0x4040`, and
      * invalid lengths below [HEADER_BYTES] by advancing one byte and searching again.
      */
-    fun offer(chunk: ByteArray): List<CsmFrame> {
+    fun offer(chunk: ByteArray): List<Iap2Frame> {
         if (chunk.isEmpty()) return emptyList()
 
-        val frames = ArrayList<CsmFrame>()
+        val frames = ArrayList<Iap2Frame>()
         var offset = 0
         while (offset < chunk.size) {
             drain(frames)
@@ -65,7 +32,7 @@ class Iap2CsmFramer {
         return frames
     }
 
-    private fun drain(frames: MutableList<CsmFrame>) {
+    private fun drain(frames: MutableList<Iap2Frame>) {
         while (true) {
             while (receive.size >= 2 && !receive.hasStart()) receive.discard(1)
             if (receive.size < HEADER_BYTES) return
@@ -80,7 +47,7 @@ class Iap2CsmFramer {
             val messageId = receive.u16(4)
             val payload = receive.copyOfRange(HEADER_BYTES, length)
             receive.discard(length)
-            frames += CsmFrame(messageId, payload)
+            frames += Iap2Frame(messageId, payload)
         }
     }
 
@@ -114,7 +81,8 @@ class Iap2CsmFramer {
         fun hasStart(): Boolean = bytes[head] == START_HIGH && bytes[head + 1] == START_LOW
 
         fun u16(offset: Int): Int =
-            ((bytes[head + offset].toInt() and 0xff) shl 8) or (bytes[head + offset + 1].toInt() and 0xff)
+            ((bytes[head + offset].toInt() and 0xff) shl 8) or
+                (bytes[head + offset + 1].toInt() and 0xff)
 
         fun copyOfRange(from: Int, to: Int): ByteArray = bytes.copyOfRange(head + from, head + to)
 
@@ -131,17 +99,18 @@ class Iap2CsmFramer {
         const val HEADER_BYTES = 6
         const val MIN_FRAME_BYTES = HEADER_BYTES
         const val MAX_FRAME_BYTES = 0xffff
+        const val MAX_BODY_BYTES = MAX_FRAME_BYTES - HEADER_BYTES
         const val MAX_PARAM_BYTES = 0xffff
         const val MAX_LINK_CHUNK_BYTES = 65_525
 
         private const val START_HIGH: Byte = 0x40
         private const val START_LOW: Byte = 0x40
 
-        /** Encodes one complete CSM frame from a message id and its header-excluded payload. */
+        /** Encodes one complete CSM frame from a message id and its header-excluded body. */
         fun encodeFrame(messageId: Int, payload: ByteArray): ByteArray {
             require(messageId in 0..0xffff) { "CSM message id must fit in u16" }
-            require(payload.size <= MAX_FRAME_BYTES - HEADER_BYTES) {
-                "CSM payload exceeds ${MAX_FRAME_BYTES - HEADER_BYTES} bytes"
+            require(payload.size <= MAX_BODY_BYTES) {
+                "CSM payload exceeds $MAX_BODY_BYTES bytes"
             }
             val frame = ByteArray(HEADER_BYTES + payload.size)
             writeU16(frame, 0, START)
@@ -154,18 +123,18 @@ class Iap2CsmFramer {
         /** Encodes one CSM parameter: `u16 length | u16 parameterId | payload`. */
         fun encodeParam(parameterId: Int, payload: ByteArray): ByteArray {
             require(parameterId in 0..0xffff) { "CSM parameter id must fit in u16" }
-            require(payload.size <= MAX_PARAM_BYTES - 4) {
-                "CSM parameter payload exceeds ${MAX_PARAM_BYTES - 4} bytes"
+            require(payload.size <= MAX_PARAM_BYTES - Iap2Parameter.HEADER_BYTES) {
+                "CSM parameter payload exceeds ${MAX_PARAM_BYTES - Iap2Parameter.HEADER_BYTES} bytes"
             }
-            val parameter = ByteArray(4 + payload.size)
+            val parameter = ByteArray(Iap2Parameter.HEADER_BYTES + payload.size)
             writeU16(parameter, 0, parameter.size)
             writeU16(parameter, 2, parameterId)
-            payload.copyInto(parameter, 4)
+            payload.copyInto(parameter, Iap2Parameter.HEADER_BYTES)
             return parameter
         }
 
         /** Splits a semantic frame into link payloads no larger than [linkChunkSize]. */
-        fun splitForLink(frame: CsmFrame, linkChunkSize: Int): List<ByteArray> =
+        fun splitForLink(frame: Iap2Frame, linkChunkSize: Int): List<ByteArray> =
             splitForLink(frame.encodedFrame(), linkChunkSize)
 
         /**
@@ -184,13 +153,18 @@ class Iap2CsmFramer {
         }
 
         private fun requireCompleteFrame(frame: ByteArray) {
-            require(frame.size in MIN_FRAME_BYTES..MAX_FRAME_BYTES) { "CSM frame size must be 6..65535" }
+            require(frame.size in MIN_FRAME_BYTES..MAX_FRAME_BYTES) {
+                "CSM frame size must be 6..65535"
+            }
             require(readU16(frame, 0) == START) { "CSM frame must start with 0x4040" }
-            require(readU16(frame, 2) == frame.size) { "CSM frame length must equal its complete size" }
+            require(readU16(frame, 2) == frame.size) {
+                "CSM frame length must equal its complete size"
+            }
         }
 
         private fun readU16(bytes: ByteArray, offset: Int): Int =
-            ((bytes[offset].toInt() and 0xff) shl 8) or (bytes[offset + 1].toInt() and 0xff)
+            ((bytes[offset].toInt() and 0xff) shl 8) or
+                (bytes[offset + 1].toInt() and 0xff)
 
         private fun writeU16(bytes: ByteArray, offset: Int, value: Int) {
             bytes[offset] = (value ushr 8).toByte()

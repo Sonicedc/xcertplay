@@ -1,5 +1,9 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
+import com.shilapi.xcertplay.iap2.message.Iap2ControlMessages
+import com.shilapi.xcertplay.iap2.session.Iap2Session
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -9,12 +13,12 @@ import kotlin.math.min
  * The wired LIVI control sequence after a CSM channel is ready:
  * Identification, MFi, power announcement, five update subscriptions, then CarPlay availability.
  *
- * The caller retains ownership of [channel].  While [run] is active it is the only receiver and
+ * The caller retains ownership of [session]. While [run] is active it is the only receiver and
  * forwards each non-availability CSM frame to [onIncoming]; it neither opens NCM nor implements
  * an AirPlay receiver.
  */
 class Iap2WiredControlClient(
-    private val channel: Iap2CsmChannel,
+    private val session: Iap2Session,
     private val mfi: Iap2MfiAuthenticationClient,
 ) {
     fun run(
@@ -23,7 +27,7 @@ class Iap2WiredControlClient(
         availableCurrentMilliAmps: Int,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         locationProvider: Iap2LocationProvider? = null,
-        onIncoming: (CsmFrame) -> Unit = {},
+        onIncoming: (Iap2Frame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WiredControlResult {
         require(availableCurrentMilliAmps in 0..0xffff) {
@@ -34,10 +38,10 @@ class Iap2WiredControlClient(
         }
 
         val deadlineNanos = deadlineAfter(timeoutMillis)
-        Iap2IdentificationClient(channel).identify(identification, requireRemaining(deadlineNanos))
+        Iap2IdentificationClient(session).identify(identification, requireRemaining(deadlineNanos))
         onProgress("iap2 identification accepted")
         var stage = Iap2WiredControlStage.IDENTIFIED
-        mfi.run(channel, requireRemaining(deadlineNanos), onProgress)
+        mfi.run(session, requireRemaining(deadlineNanos), onProgress)
         stage = Iap2WiredControlStage.AUTHENTICATED
         onProgress("iap2 authentication accepted")
 
@@ -65,9 +69,9 @@ class Iap2WiredControlClient(
                 } else {
                     remaining
                 }
-                val incoming = channel.recv(pollTimeout)
+                val incoming = session.recv(pollTimeout)
                 if (incoming == null) {
-                    if (channel.isClosed) {
+                    if (session.isClosed) {
                         return Iap2WiredControlResult(
                             Iap2WiredControlTerminal.CHANNEL_CLOSED,
                             stage,
@@ -127,8 +131,8 @@ class Iap2WiredControlClient(
         }
     }
 
-    private fun send(frame: CsmFrame, deadlineNanos: Long) {
-        channel.send(frame, requireRemaining(deadlineNanos))
+    private fun send(frame: Iap2Frame, deadlineNanos: Long) {
+        session.send(frame, requireRemaining(deadlineNanos))
     }
 
     private fun sendLatestLocation(
@@ -136,7 +140,7 @@ class Iap2WiredControlClient(
         deadlineNanos: Long,
     ): Boolean {
         val sentence = provider?.latestNmea() ?: return false
-        channel.send(
+        session.send(
             Iap2LocationMessages.locationInformation(sentence),
             requireRemaining(deadlineNanos),
         )
@@ -159,12 +163,6 @@ class Iap2WiredControlClient(
     }
 
     companion object {
-        private const val POWER_SOURCE_UPDATE = 0xae03
-        private const val START_NOW_PLAYING_UPDATES = 0x5000
-        private const val START_ROUTE_GUIDANCE_UPDATES = 0x5200
-        private const val START_POWER_UPDATES = 0xae00
-        private const val START_COMMUNICATIONS_UPDATES = 0x4157
-        private const val START_CALL_STATE_UPDATES = 0x4154
         private const val CARPLAY_AVAILABILITY = 0x4300
         private const val CARPLAY_START_SESSION = 0x4301
         private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
@@ -174,79 +172,32 @@ class Iap2WiredControlClient(
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         /** Exact LIVI wired PowerSourceUpdate encoding: current and the charge-if-powered flag. */
-        fun powerSourceUpdate(availableCurrentMilliAmps: Int): CsmFrame {
-            require(availableCurrentMilliAmps in 0..0xffff) {
-                "availableCurrentMilliAmps must be in 0..65535"
-            }
-            return frame(
-                POWER_SOURCE_UPDATE,
-                Iap2CsmParameter(0, u16(availableCurrentMilliAmps)),
-                Iap2CsmParameter(1, byteArrayOf(1)),
-            )
-        }
+        fun powerSourceUpdate(availableCurrentMilliAmps: Int): Iap2Frame =
+            Iap2ControlMessages.powerSourceUpdate(availableCurrentMilliAmps, charging = true)
 
         /** Exact five subscription requests emitted by LIVI's wired bring-up. */
-        fun subscriptions(): List<CsmFrame> = listOf(
-            frame(
-                START_NOW_PLAYING_UPDATES,
-                Iap2CsmParameter(0, flags(1, 4, 6, 12, 26)),
-                Iap2CsmParameter(1, flags(0, 1, 7)),
-            ),
-            frame(START_ROUTE_GUIDANCE_UPDATES),
-            frame(START_POWER_UPDATES, Iap2CsmParameter(4, EMPTY), Iap2CsmParameter(5, EMPTY), Iap2CsmParameter(6, EMPTY)),
-            frame(START_COMMUNICATIONS_UPDATES, Iap2CsmParameter(0, EMPTY), Iap2CsmParameter(4, EMPTY), Iap2CsmParameter(5, EMPTY)),
-            frame(START_CALL_STATE_UPDATES, Iap2CsmParameter(0, EMPTY), Iap2CsmParameter(1, EMPTY), Iap2CsmParameter(2, EMPTY), Iap2CsmParameter(3, EMPTY), Iap2CsmParameter(4, EMPTY), Iap2CsmParameter(11, EMPTY)),
-        )
+        fun subscriptions(): List<Iap2Frame> = Iap2ControlMessages.subscriptions()
 
         /** Builds the wired-only CarPlayStartSession message; no NCM or AirPlay socket is opened. */
-        fun carPlayStartSession(endpoint: Iap2WiredCarPlayEndpoint): CsmFrame {
-            // Parameter 0 is a wired-attributes group. Each address is itself a nested parameter
-            // 0 inside that group; placing the raw string directly in the outer parameter makes
-            // an otherwise valid 0x4301 undecodable by the phone.
-            val wired = Iap2CsmParameters.encode(
-                endpoint.ipv6Addresses.map { address ->
-                    Iap2CsmParameter(0, nulTerminated(address))
-                },
+        fun carPlayStartSession(endpoint: Iap2WiredCarPlayEndpoint): Iap2Frame =
+            Iap2CarPlayMessages.startSession(
+                wiredIpv6Addresses = endpoint.ipv6Addresses,
+                airPlayPort = endpoint.airPlayPort,
+                deviceIdentifier = endpoint.deviceIdentifier,
+                publicKey = endpoint.publicKey,
+                sourceVersion = endpoint.sourceVersion,
             )
-            val parameters = ArrayList<Iap2CsmParameter>(5)
-            parameters += Iap2CsmParameter(0, wired)
-            parameters += Iap2CsmParameter(2, u32(endpoint.airPlayPort))
-            endpoint.deviceIdentifier?.let { parameters += Iap2CsmParameter(3, nulTerminated(it)) }
-            parameters += Iap2CsmParameter(4, nulTerminated(endpoint.publicKey))
-            parameters += Iap2CsmParameter(5, nulTerminated(endpoint.sourceVersion))
-            return CsmFrame(CARPLAY_START_SESSION, Iap2CsmParameters.encode(parameters))
-        }
 
         fun carPlayAvailabilitySummary(payload: ByteArray): String {
             return try {
-                val outer = Iap2CsmParameters.parse(payload)
-                val wired = outer.firstOrNull { it.id == 0 }?.payload
-                    ?.let(Iap2CsmParameters::parse)
-                    .orEmpty()
-                val available = wired.firstOrNull { it.id == 0 }?.payload?.firstOrNull()
-                    ?.let { it.toInt() and 0xff }
-                val transport = wired.firstOrNull { it.id == 1 }?.payload
-                    ?.decodeToString()
-                    ?.trimEnd('\u0000')
+                val availability = Iap2CarPlayMessages.availability(payload).wired
+                val available = availability?.available
+                val transport = availability?.identifier
                 "iap2 4300 wiredAvailable=$available usbTransport=${transport ?: "none"}"
             } catch (error: RuntimeException) {
                 "iap2 4300 decode failed: ${error.message}"
             }
         }
-
-        private fun frame(messageId: Int, vararg parameters: Iap2CsmParameter): CsmFrame =
-            CsmFrame(messageId, Iap2CsmParameters.encode(parameters.asList()))
-
-        private fun flags(vararg ids: Int): ByteArray =
-            Iap2CsmParameters.encode(ids.map { Iap2CsmParameter(it, EMPTY) })
-
-        private fun u16(value: Int): ByteArray = byteArrayOf((value ushr 8).toByte(), value.toByte())
-
-        private fun u32(value: Int): ByteArray = byteArrayOf(
-            (value ushr 24).toByte(), (value ushr 16).toByte(), (value ushr 8).toByte(), value.toByte(),
-        )
-
-        private fun nulTerminated(value: String): ByteArray = value.encodeToByteArray() + byteArrayOf(0)
 
         private fun deadlineAfter(timeoutMillis: Long): Long {
             val now = System.nanoTime()
@@ -265,7 +216,6 @@ class Iap2WiredControlClient(
                 .coerceAtMost(MAX_RECV_TIMEOUT_MILLIS)
         }
 
-        private val EMPTY = ByteArray(0)
     }
 }
 

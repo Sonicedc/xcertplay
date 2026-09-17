@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.wire.Iap2CsmFramer
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import java.io.IOException
 import java.util.ArrayDeque
 import kotlin.math.min
@@ -19,7 +21,7 @@ class Iap2CsmChannel private constructor(
     private val sendLock = Object()
     private val receiveLock = Object()
     private val framer = Iap2CsmFramer()
-    private val receivedFrames = ArrayDeque<CsmFrame>()
+    private val receivedFrames = ArrayDeque<Iap2Frame>()
     private var receivedBytes = 0
     private var closed = false
     private var terminalFailure: Throwable? = null
@@ -57,7 +59,7 @@ class Iap2CsmChannel private constructor(
      * that case continuing would corrupt CSM framing, so the owned link is closed and an exception
      * is thrown instead of returning a partial-send result.
      */
-    fun send(frame: CsmFrame, timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS) {
+    fun send(frame: Iap2Frame, timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS) {
         requireTimeout(timeoutMillis)
         synchronized(sendLock) {
             try {
@@ -88,7 +90,7 @@ class Iap2CsmChannel private constructor(
      * A single underlying control payload can decode into several frames; the remainder stays in a
      * bounded queue for later calls.
      */
-    fun recv(timeoutMillis: Long): CsmFrame? {
+    fun recv(timeoutMillis: Long): Iap2Frame? {
         requireTimeout(timeoutMillis)
         synchronized(receiveLock) {
             takeReceived()?.let { return it }
@@ -139,7 +141,7 @@ class Iap2CsmChannel private constructor(
         }
     }
 
-    private fun enqueue(frame: CsmFrame) {
+    private fun enqueue(frame: Iap2Frame) {
         val encodedBytes = frame.encodedFrame().size
         if (receivedFrames.size >= MAX_PENDING_FRAMES || encodedBytes > MAX_PENDING_FRAME_BYTES - receivedBytes) {
             failClosed(IOException("CSM received-frame queue limit exceeded"))
@@ -148,7 +150,7 @@ class Iap2CsmChannel private constructor(
         receivedBytes += encodedBytes
     }
 
-    private fun takeReceived(): CsmFrame? {
+    private fun takeReceived(): Iap2Frame? {
         val frame = receivedFrames.pollFirst() ?: return null
         receivedBytes -= frame.encodedFrame().size
         return frame

@@ -1,5 +1,9 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
+import com.shilapi.xcertplay.iap2.wire.Iap2Parameter
+import com.shilapi.xcertplay.iap2.wire.Iap2ParameterList
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,21 +48,21 @@ class Iap2WirelessControlClientTest {
                 ssid = "LIVI",
             ),
         )
-        val parameters = Iap2CsmParameters.parse(
+        val parameters = parameters(
             Iap2IdentificationClient.identificationInformation(config).payload,
         )
 
         assertNull(parameters.firstOrNull { it.id == 16 })
         assertArrayEquals(byteArrayOf(0), parameters.single { it.id == 8 }.payload)
 
-        val bluetooth = Iap2CsmParameters.parse(parameters.single { it.id == 17 }.payload)
+        val bluetooth = parameters(parameters.single { it.id == 17 }.payload)
         assertEquals("blue\u0000", bluetooth.single { it.id == 1 }.payload.decodeToString())
         assertArrayEquals(
             byteArrayOf(0xaa.toByte(), 0xbb.toByte(), 0xcc.toByte(), 0xdd.toByte(), 0xee.toByte(), 0xff.toByte()),
             bluetooth.single { it.id == 3 }.payload,
         )
 
-        val wireless = Iap2CsmParameters.parse(parameters.single { it.id == 24 }.payload)
+        val wireless = parameters(parameters.single { it.id == 24 }.payload)
         assertEquals("LIVI\u0000", wireless.single { it.id == 1 }.payload.decodeToString())
 
         val sent = u16Values(parameters.single { it.id == 6 }.payload)
@@ -73,16 +77,13 @@ class Iap2WirelessControlClientTest {
     }
 
     @Test
-    fun wirelessCarPlayUpdateStatusReadsParameterZero() {
-        val frame = CsmFrame(
+    fun wirelessCarPlayUpdateReadsBooleanAvailability() {
+        val frame = Iap2Frame(
             0x4e0d,
-            Iap2CsmParameters.encode(
-                listOf(Iap2CsmParameter(0, byteArrayOf(1))),
-            ),
+            Iap2ParameterList.of(Iap2Parameter(0, byteArrayOf(1))).encode(),
         )
 
-        assertEquals(1, Iap2WirelessControlClient.wirelessCarPlayUpdateStatus(frame))
-        assertEquals("connecting", Iap2WirelessControlClient.wirelessCarPlayStatusName(1))
+        assertTrue(Iap2WirelessMessages.wirelessCarPlayAvailability(frame))
     }
 
     @Test
@@ -96,7 +97,7 @@ class Iap2WirelessControlClientTest {
             hardwareVersion = "1.0",
             carPlayUsbInterfaceNumber = 4,
         )
-        val parameters = Iap2CsmParameters.parse(
+        val parameters = parameters(
             Iap2IdentificationClient.identificationInformation(config).payload,
         )
 
@@ -120,6 +121,8 @@ class Iap2WirelessControlClientTest {
         List(bytes.size / 2) { index ->
             ((bytes[index * 2].toInt() and 0xff) shl 8) or (bytes[index * 2 + 1].toInt() and 0xff)
         }
+
+    private fun parameters(bytes: ByteArray) = Iap2ParameterList.parse(bytes).asList()
 
     private fun ByteArray.hex(): String =
         joinToString(separator = "") { "%02x".format(it.toInt() and 0xff) }

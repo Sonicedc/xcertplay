@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.message.Iap2ControlMessages
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -134,19 +136,8 @@ object Iap2LocationMessages {
     const val LOCATION_INFORMATION = 0xfffb
     const val STOP_LOCATION_INFORMATION = 0xfffc
 
-    fun locationInformation(nmeaSentence: String): CsmFrame {
+    fun locationInformation(nmeaSentence: String): Iap2Frame {
         require(nmeaSentence.isNotEmpty()) { "NMEA sentence must not be empty" }
-        require('\u0000' !in nmeaSentence) { "NMEA sentence must not contain U+0000" }
-        return CsmFrame(
-            LOCATION_INFORMATION,
-            Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(
-                        0,
-                        nmeaSentence.encodeToByteArray() + byteArrayOf(0),
-                    ),
-                ),
-            ),
-        )
+        return Iap2ControlMessages.locationInformation(nmeaSentence)
     }
 }

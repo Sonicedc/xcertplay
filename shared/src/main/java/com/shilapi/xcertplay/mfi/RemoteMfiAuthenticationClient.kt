@@ -8,8 +8,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
-import com.shilapi.xcertplay.transport.Iap2CsmParameter
-import com.shilapi.xcertplay.transport.Iap2CsmParameters
+import com.shilapi.xcertplay.iap2.message.Iap2AuthenticationMessages
 
 /** Blocking HTTP implementation of the MFI certificate and challenge-signing operations. */
 class RemoteMfiAuthenticationClient(
@@ -143,13 +142,10 @@ class RemoteMfiAuthenticationClient(
             null
         }
         val iap2Certificate = if (baaCertificates != null) {
-            Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, baaCertificates.leaf),
-                    Iap2CsmParameter(1, byteArrayOf(1)),
-                    Iap2CsmParameter(2, baaCertificates.intermediate),
-                ),
-            )
+            Iap2AuthenticationMessages.baaCertificatePackage(
+                baaCertificates.leaf,
+                baaCertificates.intermediate,
+            ).payload
         } else {
             certificate.copyOf()
         }

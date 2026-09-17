@@ -26,6 +26,7 @@ import com.shilapi.xcertplay.airplay.AirPlayMediaHandler
 import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
+import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.RemoteMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
@@ -41,7 +42,6 @@ import com.shilapi.xcertplay.transport.Ch341DeviceMatcher
 import com.shilapi.xcertplay.transport.Ch341I2cTransport
 import com.shilapi.xcertplay.transport.Ch341UsbHost
 import com.shilapi.xcertplay.transport.Ch341UsbSession
-import com.shilapi.xcertplay.transport.Iap2CsmChannel
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.Iap2LocationProvider
 import com.shilapi.xcertplay.transport.Iap2UsbMuxHost
@@ -179,13 +179,13 @@ class CarPlayController(
     @Volatile private var ch341Host: Ch341UsbHost? = null
     @Volatile private var mfiSession: MfiSession? = null
     @Volatile private var mux: Iap2UsbMuxHost? = null
-    @Volatile private var csm: Iap2CsmChannel? = null
+    @Volatile private var csm: Iap2Session? = null
     @Volatile private var activeSession: AirPlaySession? = null
     @Volatile private var hotspot: WirelessHotspotManager? = null
     @Volatile private var bonjour: CarPlayBonjour? = null
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
-    @Volatile private var wirelessTunnelChannel: Iap2CsmChannel? = null
+    @Volatile private var wirelessTunnelChannel: Iap2Session? = null
     @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: CarPlayVpnService? = null
@@ -763,7 +763,11 @@ class CarPlayController(
                 return
             }
             val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
-            val channel = Iap2CsmChannel.openWireless(stream).also { csm = it }
+            val channel = Iap2Session.openWireless(
+                stream,
+                traceContext = "wireless-rfcomm",
+                onTrace = ::debugLog,
+            ).also { csm = it }
             debugLog("wireless iAP2 CSM channel opened over RFCOMM")
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
@@ -790,7 +794,7 @@ class CarPlayController(
             onStatus(CarPlayStatus.RunningWireless)
             debugLog("wireless Bluetooth iAP2 control starting")
             val result = Iap2WirelessControlClient(
-                channel = channel,
+                session = channel,
                 mfi = Iap2MfiAuthenticationClient(mfi),
             ).run(
                 identification = identification,
@@ -807,7 +811,7 @@ class CarPlayController(
                 Iap2WirelessControlTerminal.CHANNEL_CLOSED -> {
                     debugLog(
                         "wireless RFCOMM EOF: iap2State=${result.stage} " +
-                            "wirelessCarPlayConnecting=${result.wirelessCarPlayConnectingSeen} " +
+                            "wirelessCarPlayAvailable=${result.wirelessCarPlayAvailableSeen} " +
                             "transportIdentifier=${result.transportNotificationSeen} " +
                             "carPlayStartSessions=${result.carPlayStartSessionsSent} " +
                             "postTransportConfigs=${result.postTransportWiFiConfigurationsSent} " +
@@ -859,7 +863,11 @@ class CarPlayController(
         val mfi = mfiSession?.client ?: return false
         debugLog("wireless type-130 tunnel data stream accepted")
         val channel = try {
-            Iap2CsmChannel.openTunnel(stream)
+            Iap2Session.openTunnel(
+                stream,
+                traceContext = "wireless-tunnel",
+                onTrace = ::debugLog,
+            )
         } catch (error: Throwable) {
             debugLog("Could not open the tunneled iAP2 link", error)
             return false
@@ -871,7 +879,7 @@ class CarPlayController(
             tunnelExecutor.execute {
                 try {
                     val result = Iap2WirelessControlClient(
-                        channel = channel,
+                        session = channel,
                         mfi = Iap2MfiAuthenticationClient(mfi),
                     ).run(
                         identification = identification,
@@ -1218,7 +1226,11 @@ class CarPlayController(
                 carKitClient.open(pairRecord, config.label)
             }
             debugLog("wired com.apple.carkit.service stream opened")
-            val csm = Iap2CsmChannel.open(carkit)
+            val csm = Iap2Session.open(
+                carkit,
+                traceContext = "wired",
+                onTrace = ::debugLog,
+            )
             this.csm = csm
             debugLog("wired iAP2 CSM channel opened")
 

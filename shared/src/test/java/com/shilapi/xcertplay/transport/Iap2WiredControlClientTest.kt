@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay.transport
 
+import com.shilapi.xcertplay.iap2.body.Iap2BodyReader
+import com.shilapi.xcertplay.iap2.wire.Iap2ParameterList
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -18,9 +20,9 @@ class Iap2WiredControlClientTest {
         )
 
         assertEquals(0x4301, frame.messageId)
-        val outer = Iap2CsmParameters.parse(frame.payload)
+        val outer = Iap2BodyReader.of(frame).list()
         val wired = outer.single { it.id == 0 }
-        val addresses = Iap2CsmParameters.parse(wired.payload)
+        val addresses = Iap2ParameterList.parse(wired.payload).asList()
         assertEquals(1, addresses.size)
         assertEquals(0, addresses.single().id)
         assertArrayEquals("fe80::2\u0000".encodeToByteArray(), addresses.single().payload)

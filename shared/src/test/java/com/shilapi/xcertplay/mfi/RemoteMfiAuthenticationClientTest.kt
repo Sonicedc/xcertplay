@@ -2,8 +2,7 @@ package com.shilapi.xcertplay.mfi
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import com.shilapi.xcertplay.transport.Iap2CsmParameter
-import com.shilapi.xcertplay.transport.Iap2CsmParameters
+import com.shilapi.xcertplay.iap2.message.Iap2AuthenticationMessages
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -132,13 +131,7 @@ class RemoteMfiAuthenticationClientTest {
         val client = RemoteMfiAuthenticationClient(serverAddress())
         assertEquals(MfiCertificateType.BAA, client.certificateType)
         assertArrayEquals(
-            Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, leaf),
-                    Iap2CsmParameter(1, byteArrayOf(1)),
-                    Iap2CsmParameter(2, intermediate),
-                ),
-            ),
+            Iap2AuthenticationMessages.baaCertificatePackage(leaf, intermediate).payload,
             client.readCertificate(),
         )
         val certificates = client.baaCertificates()

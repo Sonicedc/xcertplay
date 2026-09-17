@@ -1,11 +1,10 @@
 package com.shilapi.xcertplay.mfi
 
-import com.shilapi.xcertplay.transport.CsmFrame
-import com.shilapi.xcertplay.transport.Iap2CsmChannel
-import com.shilapi.xcertplay.transport.Iap2CsmParameter
-import com.shilapi.xcertplay.transport.Iap2CsmParameters
+import com.shilapi.xcertplay.iap2.message.Iap2AuthenticationMessages
+import com.shilapi.xcertplay.iap2.session.Iap2Session
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 
-/** Runs LIVI's minimal iAP2 CSM MFi exchange without taking ownership of [Iap2CsmChannel]. */
+/** Runs LIVI's minimal iAP2 CSM MFi exchange without taking ownership of [Iap2Session]. */
 class Iap2MfiAuthenticationClient(
     private val authentication: MfiAuthenticator,
     private val maximumCertificateLength: Int = MfiAuthenticationClient.DEFAULT_MAXIMUM_CERTIFICATE_OUTPUT_LENGTH,
@@ -18,7 +17,7 @@ class Iap2MfiAuthenticationClient(
 
     /** Blocks until the phone confirms AA05, or throws a typed authentication failure. */
     fun run(
-        channel: Iap2CsmChannel,
+        session: Iap2Session,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         onProgress: (String) -> Unit = {},
     ) {
@@ -27,26 +26,26 @@ class Iap2MfiAuthenticationClient(
         }
         val deadlineNanos = deadlineAfter(timeoutMillis)
         val certificate = authentication.readCertificate(maximumCertificateLength)
-        val certificatePayload = when (authentication.certificateType) {
-            MfiCertificateType.MFI ->
-                Iap2CsmParameters.encode(listOf(Iap2CsmParameter(0, certificate)))
-            MfiCertificateType.BAA -> certificate.copyOf()
+        val certificateFrame = when (authentication.certificateType) {
+            MfiCertificateType.MFI -> Iap2AuthenticationMessages.accessoryCertificate(certificate)
+            MfiCertificateType.BAA -> Iap2AuthenticationMessages.accessoryCertificateBody(certificate)
         }
+        val certificatePayloadBytes = certificateFrame.payload.size
         onProgress(
             "mfi type=${authentication.certificateType} " +
                 "certificate loaded bytes=${certificate.size} " +
-                "payload bytes=${certificatePayload.size}",
+                "payload bytes=$certificatePayloadBytes",
         )
         while (true) {
             val remaining = remainingMillis(deadlineNanos)
             if (remaining == 0L) throw Iap2MfiAuthenticationException("Timed out waiting for iAP2 MFi authentication")
-            val frame = channel.recv(remaining)
+            val frame = session.recv(remaining)
                 ?: throw Iap2MfiAuthenticationException("Timed out waiting for iAP2 MFi authentication")
             when (frame.messageId) {
                 REQUEST_CERTIFICATE -> {
                     onProgress("iap2 mfi rx=0xaa00 request-certificate")
-                    sendPayload(channel, CERTIFICATE, certificatePayload, deadlineNanos)
-                    onProgress("iap2 mfi tx=0xaa01 certificate bytes=${certificatePayload.size}")
+                    send(session, certificateFrame, deadlineNanos)
+                    onProgress("iap2 mfi tx=0xaa01 certificate bytes=$certificatePayloadBytes")
                 }
                 REQUEST_CHALLENGE -> {
                     val challenge = requireParameterZero(frame)
@@ -55,7 +54,7 @@ class Iap2MfiAuthenticationClient(
                     }
                     onProgress("iap2 mfi rx=0xaa02 challenge bytes=${challenge.size}")
                     val signature = authentication.signChallenge(challenge)
-                    sendParameterZero(channel, RESPONSE, signature, deadlineNanos)
+                    send(session, Iap2AuthenticationMessages.response(signature), deadlineNanos)
                     onProgress("iap2 mfi tx=0xaa03 signature bytes=${signature.size}")
                 }
                 AUTHENTICATION_SUCCEEDED -> {
@@ -70,37 +69,22 @@ class Iap2MfiAuthenticationClient(
         }
     }
 
-    private fun sendParameterZero(
-        channel: Iap2CsmChannel,
-        messageId: Int,
-        payload: ByteArray,
-        deadlineNanos: Long,
-    ) {
-        val parameters = Iap2CsmParameters.encode(listOf(Iap2CsmParameter(0, payload)))
-        sendPayload(channel, messageId, parameters, deadlineNanos)
-    }
-
-    private fun sendPayload(
-        channel: Iap2CsmChannel,
-        messageId: Int,
-        payload: ByteArray,
+    private fun send(
+        session: Iap2Session,
+        frame: Iap2Frame,
         deadlineNanos: Long,
     ) {
         val remaining = remainingMillis(deadlineNanos)
         if (remaining == 0L) throw Iap2MfiAuthenticationException("Timed out sending iAP2 MFi authentication reply")
-        channel.send(CsmFrame(messageId, payload), remaining)
+        session.send(frame, remaining)
     }
 
-    private fun requireParameterZero(frame: CsmFrame): ByteArray {
-        val parameters = parse(frame)
-        return parameters.firstOrNull { it.id == 0 }?.payload
-            ?: throw Iap2MfiAuthenticationException("iAP2 MFi challenge is missing parameter 0")
-    }
-
-    private fun parse(frame: CsmFrame): List<Iap2CsmParameter> = try {
-        Iap2CsmParameters.parse(frame.payload)
-    } catch (failure: Exception) {
-        throw Iap2MfiAuthenticationException("Malformed iAP2 MFi parameters", failure)
+    private fun requireParameterZero(frame: Iap2Frame): ByteArray {
+        return try {
+            Iap2AuthenticationMessages.challenge(frame)
+        } catch (failure: Exception) {
+            throw Iap2MfiAuthenticationException("iAP2 MFi challenge is missing parameter 0", failure)
+        }
     }
 
     private fun deadlineAfter(timeoutMillis: Long): Long {

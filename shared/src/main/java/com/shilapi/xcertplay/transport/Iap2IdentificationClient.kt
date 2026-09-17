@@ -1,72 +1,12 @@
 package com.shilapi.xcertplay.transport
 
-import java.io.ByteArrayOutputStream
+import com.shilapi.xcertplay.iap2.body.Iap2BodyReader
+import com.shilapi.xcertplay.iap2.catalog.Iap2Endpoints
+import com.shilapi.xcertplay.iap2.message.Iap2Messages
+import com.shilapi.xcertplay.iap2.session.Iap2Session
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import java.io.IOException
 import kotlin.math.min
-
-/** A single length-prefixed CSM parameter, without message-specific interpretation. */
-class Iap2CsmParameter(id: Int, payload: ByteArray) {
-    val id: Int
-    private val bytes: ByteArray
-
-    init {
-        require(id in 0..0xffff) { "CSM parameter id must fit in u16" }
-        require(payload.size <= Iap2CsmFramer.MAX_PARAM_BYTES - 4) {
-            "CSM parameter payload exceeds ${Iap2CsmFramer.MAX_PARAM_BYTES - 4} bytes"
-        }
-        this.id = id
-        bytes = payload.copyOf()
-    }
-
-    val payload: ByteArray get() = bytes.copyOf()
-
-    override fun equals(other: Any?): Boolean =
-        other is Iap2CsmParameter && id == other.id && bytes.contentEquals(other.bytes)
-
-    override fun hashCode(): Int = 31 * id + bytes.contentHashCode()
-}
-
-/** Strict, reusable CSM `u16 length | u16 id | payload` encoding and parsing. */
-object Iap2CsmParameters {
-    fun encode(parameters: Iterable<Iap2CsmParameter>): ByteArray {
-        val encoded = ByteArrayOutputStream()
-        for (parameter in parameters) {
-            val next = Iap2CsmFramer.encodeParam(parameter.id, parameter.payload)
-            require(next.size <= MAX_CSM_PAYLOAD_BYTES - encoded.size()) {
-                "Encoded CSM parameters exceed the $MAX_CSM_PAYLOAD_BYTES-byte message payload limit"
-            }
-            encoded.write(next)
-        }
-        return encoded.toByteArray()
-    }
-
-    /** Rejects truncated headers, invalid lengths, and trailing bytes instead of silently dropping them. */
-    fun parse(encoded: ByteArray): List<Iap2CsmParameter> {
-        val parameters = ArrayList<Iap2CsmParameter>()
-        var offset = 0
-        while (offset < encoded.size) {
-            if (encoded.size - offset < HEADER_BYTES) {
-                throw IphoneUsbException.Protocol("Truncated CSM parameter header")
-            }
-            val length = u16(encoded, offset)
-            if (length < HEADER_BYTES || length > encoded.size - offset) {
-                throw IphoneUsbException.Protocol("Invalid CSM parameter length $length")
-            }
-            parameters += Iap2CsmParameter(
-                id = u16(encoded, offset + 2),
-                payload = encoded.copyOfRange(offset + HEADER_BYTES, offset + length),
-            )
-            offset += length
-        }
-        return parameters
-    }
-
-    private fun u16(bytes: ByteArray, offset: Int): Int =
-        ((bytes[offset].toInt() and 0xff) shl 8) or (bytes[offset + 1].toInt() and 0xff)
-
-    private const val HEADER_BYTES = 4
-    private const val MAX_CSM_PAYLOAD_BYTES = Iap2CsmFramer.MAX_FRAME_BYTES - Iap2CsmFramer.HEADER_BYTES
-}
 
 /** The wireless transport identity advertised on the Bluetooth identification session. */
 class Iap2WirelessIdentification(
@@ -178,7 +118,7 @@ sealed class Iap2IdentificationException(message: String) : IOException(message)
  * This is intentionally only identification: it neither invokes MFi nor itself starts any
  * CarPlay, subscription, power, media, or UI service.
  */
-class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
+class Iap2IdentificationClient(private val session: Iap2Session) {
     /** Waits for link negotiation, then completes the 1D00/1D01/1D02 exchange. */
     @Throws(IphoneUsbException::class, Iap2IdentificationException::class)
     fun identify(config: Iap2IdentificationConfig, timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS) {
@@ -186,18 +126,18 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
             "timeoutMillis must be in 1..$MAXIMUM_TIMEOUT_MILLIS"
         }
         val deadlineNanos = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
-        if (!channel.awaitReady(remainingMillis(deadlineNanos))) {
+        if (!session.awaitReady(remainingMillis(deadlineNanos))) {
             throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 control session readiness")
         }
 
         while (true) {
-            val frame = channel.recv(remainingMillis(deadlineNanos))
+            val frame = session.recv(remainingMillis(deadlineNanos))
                 ?: throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 identification")
             when (frame.messageId) {
-                START_IDENTIFICATION -> channel.send(identificationInformation(config), remainingMillis(deadlineNanos))
+                START_IDENTIFICATION -> session.send(identificationInformation(config), remainingMillis(deadlineNanos))
                 IDENTIFICATION_ACCEPTED -> return
                 IDENTIFICATION_REJECTED -> {
-                    val rejected = Iap2CsmParameters.parse(frame.payload).mapTo(LinkedHashSet()) { it.id }
+                    val rejected = Iap2BodyReader.of(frame).list().mapTo(LinkedHashSet()) { it.id }
                     throw Iap2IdentificationException.Rejected(rejected)
                 }
                 else -> throw Iap2IdentificationException.UnexpectedMessage(frame.messageId)
@@ -216,24 +156,8 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
         private const val NANOS_PER_MILLISECOND = 1_000_000L
 
         /** Builds the smallest honest LIVI-compatible wired or wireless IdentificationInformation. */
-        fun identificationInformation(config: Iap2IdentificationConfig): CsmFrame {
-            val externalAccessoryProtocol = Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, byteArrayOf(1)),
-                    Iap2CsmParameter(1, nulTerminated(config.externalAccessoryProtocol)),
-                    Iap2CsmParameter(2, byteArrayOf(0)),
-                ),
-            )
+        fun identificationInformation(config: Iap2IdentificationConfig): Iap2Frame {
             val wireless = config.wireless
-            val usbHostTransport = Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, u16(0)),
-                    Iap2CsmParameter(1, nulTerminated("USBHostTransport")),
-                    Iap2CsmParameter(2, EMPTY),
-                    Iap2CsmParameter(3, byteArrayOf(config.carPlayUsbInterfaceNumber.toByte())),
-                    Iap2CsmParameter(4, EMPTY),
-                ),
-            )
             val sentMessages = if (config.locationInformationEnabled) {
                 MESSAGES_SENT_BY_ACCESSORY + LOCATION_INFORMATION
             } else {
@@ -244,99 +168,73 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
             } else {
                 MESSAGES_RECEIVED_FROM_PHONE
             }
-            val parameters = mutableListOf(
-                Iap2CsmParameter(0, nulTerminated(config.name)),
-                Iap2CsmParameter(1, nulTerminated(config.modelIdentifier)),
-                Iap2CsmParameter(2, nulTerminated(config.manufacturer)),
-                Iap2CsmParameter(3, nulTerminated(config.serialNumber)),
-                Iap2CsmParameter(4, nulTerminated(config.firmwareVersion)),
-                Iap2CsmParameter(5, nulTerminated(config.hardwareVersion)),
-                Iap2CsmParameter(
+            return Iap2Messages.build(Iap2Endpoints.IDENTIFICATION_INFORMATION) {
+                string(0, config.name)
+                string(1, config.modelIdentifier)
+                string(2, config.manufacturer)
+                string(3, config.serialNumber)
+                string(4, config.firmwareVersion)
+                string(5, config.hardwareVersion)
+                u16List(
                     6,
-                    u16List(
-                        if (wireless == null) {
-                            sentMessages
-                        } else {
-                            sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray() +
-                                ACCESSORY_WIFI_CONFIGURATION_INFORMATION
-                        },
-                    ),
-                ),
-                Iap2CsmParameter(
+                    if (wireless == null) {
+                        sentMessages.asIterable()
+                    } else {
+                        sentMessages.filterNot { it == POWER_SOURCE_UPDATE }.toIntArray().asIterable() +
+                            ACCESSORY_WIFI_CONFIGURATION_INFORMATION
+                    },
+                )
+                u16List(
                     7,
-                    u16List(
-                        if (wireless == null) {
-                            receivedMessages
-                        } else {
-                            receivedMessages +
-                                WIRELESS_PHONE_MESSAGES
-                        },
-                    ),
-                ),
-                Iap2CsmParameter(8, byteArrayOf(if (wireless == null) 2 else 0)),
-                Iap2CsmParameter(9, u16(20)),
-                Iap2CsmParameter(10, externalAccessoryProtocol),
-                Iap2CsmParameter(12, nulTerminated(config.language)),
-                Iap2CsmParameter(13, nulTerminated(config.language)),
-            )
-            if (wireless == null) {
-                parameters += Iap2CsmParameter(16, usbHostTransport)
-            } else {
-                parameters += Iap2CsmParameter(17, bluetoothTransport(wireless))
-                parameters += Iap2CsmParameter(24, wirelessCarPlayTransport(wireless))
-            }
-            if (config.locationInformationEnabled) {
-                parameters += Iap2CsmParameter(22, locationInformationComponent(config.name))
-            }
-            val payload = Iap2CsmParameters.encode(parameters)
-            check(payload.size + Iap2CsmFramer.HEADER_BYTES <= Iap2CsmFramer.MAX_FRAME_BYTES) {
-                "IdentificationInformation exceeds the complete CSM frame limit"
-            }
-            return CsmFrame(IDENTIFICATION_INFORMATION, payload)
-        }
-
-        private fun bluetoothTransport(identity: Iap2WirelessIdentification): ByteArray =
-            Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, u16(0)),
-                    Iap2CsmParameter(1, nulTerminated("blue")),
-                    Iap2CsmParameter(2, EMPTY),
-                    Iap2CsmParameter(3, identity.bluetoothMacBytes()),
-                    Iap2CsmParameter(4, nulTerminated("blue")),
-                    Iap2CsmParameter(5, EMPTY),
-                ),
-            )
-
-        private fun wirelessCarPlayTransport(identity: Iap2WirelessIdentification): ByteArray =
-            Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, u16(1)),
-                    Iap2CsmParameter(1, nulTerminated(identity.ssid)),
-                    Iap2CsmParameter(2, EMPTY),
-                    Iap2CsmParameter(3, u16(1)),
-                    Iap2CsmParameter(4, EMPTY),
-                    Iap2CsmParameter(5, EMPTY),
-                ),
-            )
-
-        private fun locationInformationComponent(name: String): ByteArray =
-            Iap2CsmParameters.encode(
-                listOf(
-                    Iap2CsmParameter(0, u16(0)),
-                    Iap2CsmParameter(1, nulTerminated(name)),
-                    Iap2CsmParameter(17, EMPTY),
-                    Iap2CsmParameter(18, EMPTY),
-                ),
-            )
-
-        private fun nulTerminated(value: String): ByteArray = value.encodeToByteArray() + byteArrayOf(0)
-
-        private fun u16(value: Int): ByteArray = byteArrayOf((value ushr 8).toByte(), value.toByte())
-
-        private fun u16List(values: IntArray): ByteArray = ByteArray(values.size * 2).also { bytes ->
-            values.forEachIndexed { index, value ->
-                bytes[index * 2] = (value ushr 8).toByte()
-                bytes[index * 2 + 1] = value.toByte()
+                    if (wireless == null) {
+                        receivedMessages.asIterable()
+                    } else {
+                        receivedMessages.asIterable() + WIRELESS_PHONE_MESSAGES.asIterable()
+                    },
+                )
+                u8(8, if (wireless == null) 2 else 0)
+                u16(9, 20)
+                group(10) {
+                    u8(0, 1)
+                    string(1, config.externalAccessoryProtocol)
+                    u8(2, 0)
+                }
+                string(12, config.language)
+                strings(13, listOf(config.language))
+                if (wireless == null) {
+                    group(16) {
+                        u16(0, 0)
+                        string(1, "USBHostTransport")
+                        void(2)
+                        u8(3, config.carPlayUsbInterfaceNumber)
+                        void(4)
+                    }
+                } else {
+                    group(17) {
+                        u16(0, 0)
+                        string(1, "blue")
+                        void(2)
+                        bytes(3, wireless.bluetoothMacBytes())
+                        string(4, "blue")
+                        void(5)
+                    }
+                    group(24) {
+                        u16(0, 1)
+                        string(1, wireless.ssid)
+                        void(2)
+                        u16(3, 1)
+                        void(4)
+                        void(5)
+                    }
+                }
+                if (config.locationInformationEnabled) {
+                    group(22) {
+                        u16(0, 0)
+                        string(1, config.name)
+                        void(17)
+                        void(18)
+                    }
+                }
             }
         }
 
@@ -346,7 +244,6 @@ class Iap2IdentificationClient(private val channel: Iap2CsmChannel) {
             return min(MAXIMUM_TIMEOUT_MILLIS, (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND)
         }
 
-        private val EMPTY = ByteArray(0)
         /* Keep this list paired with Iap2WiredControlClient; no stop or AA messages are claimed. */
         private val MESSAGES_SENT_BY_ACCESSORY = intArrayOf(
             0x5000, // StartNowPlayingUpdates
