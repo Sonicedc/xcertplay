@@ -13,6 +13,7 @@ local.properties
 .cxx/
 .externalNativeBuild/
 captures/
+/builds/
 
 # Local agent working notes
 /agent_docs/

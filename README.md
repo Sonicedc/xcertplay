@@ -42,6 +42,15 @@ Adapter board: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 
 Waiting for the MFI chip adapter board to arrive...
 
+### QZD / Zjinnova 6125 head-unit research
+
+The `vehicle/qzd-low-latency` branch contains an experimental integration for
+a QZD G6 / Zjinnova-based Android head unit. It adds native-board MFi access,
+a vendor Bluetooth bootstrap transport, head-unit performance controls, and
+on-screen latency diagnostics. See
+[docs/QZD-6125-HEAD-UNIT.md](docs/QZD-6125-HEAD-UNIT.md) for the hardware
+assumptions, implementation notes, tunables, test procedure, and known limits.
+
 ## Project structure
 
 | Path | Purpose |
@@ -50,6 +59,7 @@ Waiting for the MFI chip adapter board to arrive...
 | `mobile/` | Standard Android target using the shared CarPlay host UI. |
 | `automotive/` | Android Automotive OS target with the shared host UI and advanced audio channel mapping. |
 | `shared/` | Car App Library code plus the CH341, I2C, MFi, iPhone, iAP2, NCM, VPN, AirPlay, and media implementations. |
+| `docs/` | Hardware-specific research and integration notes. |
 
 ## Remote MFI
 
