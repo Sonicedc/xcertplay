@@ -5,6 +5,7 @@ import java.io.Closeable
 import java.net.InetAddress
 
 enum class WirelessHotspotBackend(val label: String) {
+    SYSTEM_SOFT_AP("System SoftAP (5 GHz)"),
     WIFI_P2P("Wi-Fi P2P"),
     LOCAL_ONLY_HOTSPOT("LocalOnlyHotspot"),
     MANUAL_HOTSPOT("Manual hotspot"),

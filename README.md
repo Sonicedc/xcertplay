@@ -8,6 +8,14 @@ controller, and supports both wired and wireless CarPlay connections.
 
 > Still under active development.
 
+> [!IMPORTANT]
+> The QZD/JOYING changes in this fork were added onto `xcertplay` with
+> assistance from artificial intelligence. They are experimental and were
+> developed against one specific head unit. We cannot confirm their
+> reliability, compatibility, or safety on your device. Review the source,
+> keep a recovery path available, test while parked, and do not rely on this
+> software for safety-critical vehicle functions.
+
 ## Features
 
 - CarPlay host applications for Android and Android Automotive OS.
@@ -50,6 +58,58 @@ a vendor Bluetooth bootstrap transport, head-unit performance controls, and
 on-screen latency diagnostics. See
 [docs/QZD-6125-HEAD-UNIT.md](docs/QZD-6125-HEAD-UNIT.md) for the hardware
 assumptions, implementation notes, tunables, test procedure, and known limits.
+
+The vendor `blink` Bluetooth interface observed on this unit appears to be a
+proprietary JOYING/Zjinnova firmware component, not a standard Android
+Bluetooth API. See [JOYING `blink` Bluetooth notes](docs/JOYING-BLINK-BLUETOOTH.md)
+for the observed loopback endpoint and framing, portability limits, and native
+Android fallback behavior.
+
+### Root and unrooted devices
+
+The application does **not** universally require root:
+
+- Unrooted devices can use a supported CH341 USB MFi adapter or Remote MFi,
+  plus Wi-Fi Direct or other networking exposed by Android's public APIs.
+- The JOYING/Zjinnova `blink` loopback transport does not itself require root
+  when the vendor firmware makes `127.0.0.1:3152` available to applications.
+- Direct access to an onboard `/dev/i2c-N` MFi device requires the Android app
+  UID to have Unix and SELinux permission. On many consumer head units that
+  means root, a Magisk/vendor permission setup, or installation as an approved
+  system application.
+- Reading and starting the tested unit's existing firmware-managed SoftAP uses
+  `su` when Android's privileged tethering APIs reject the app. Without root,
+  `Automatic` falls back to Wi-Fi Direct rather than requiring that path.
+
+This repository does not root a device, unlock a bootloader, change SELinux,
+or bundle Magisk. A rooted device may still need an explicit root grant or
+device-permission rule for the selected hardware path.
+
+## Changelog
+
+### QZD/JOYING Low-Latency v0.2.0 — 2026-09-18
+
+- Added native-board MFi discovery through configurable Linux I2C devices and
+  expanded hardware diagnostics.
+- Added the experimental JOYING/Zjinnova `blink` Bluetooth bootstrap transport
+  with fallback to Android RFCOMM.
+- Added wired and wireless CarPlay bring-up, 5 GHz Wi-Fi Direct, and automatic
+  selection of a verified firmware-managed 5 GHz SoftAP.
+- Added a root-scoped Android tethering helper so the saved system hotspot can
+  start during boot on the tested Android 10 firmware.
+- Added boot and quick-boot auto-start, with synchronous persistence for
+  auto-start, wireless mode, diagnostics overlay, location reporting, and
+  display scale settings.
+- Added low-latency video/audio scheduling, Qualcomm decoder hints, wake and
+  Wi-Fi locks, touch handling improvements, and an optional performance
+  statistics overlay.
+- Added a settings screen that remains available without intentionally ending
+  the AirPlay session, including a customizable AirPlay icon and tunable
+  resolution scale.
+- Added on-device network backend reporting and detailed wireless, media, and
+  protocol diagnostics.
+- Documented the tested QZD/JOYING hardware assumptions, root boundaries,
+  known limitations, and validation procedure.
 
 ## Project structure
 

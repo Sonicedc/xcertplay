@@ -1,5 +1,8 @@
 package com.shilapi.xcertplay.network
 
+import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -65,5 +68,34 @@ class WirelessHotspotManagerTest {
                 apFrequencyMHz = null,
             ),
         )
+    }
+
+    @Test
+    fun normalizesLegacySoftApBands() {
+        assertEquals(1, normalizeLegacySoftApBand(0))
+        assertEquals(2, normalizeLegacySoftApBand(1))
+        assertNull(normalizeLegacySoftApBand(2))
+    }
+
+    @Test
+    fun parsesFirmwareLegacySoftApConfiguration() {
+        val bytes = ByteArrayOutputStream().also { output ->
+            DataOutputStream(output).use { data ->
+                data.writeInt(3)
+                data.writeUTF("FirmwareAP")
+                data.writeInt(1)
+                data.writeInt(0)
+                data.writeBoolean(false)
+                data.writeInt(4)
+                data.writeUTF("secret12")
+            }
+        }.toByteArray()
+
+        val record = parseLegacySoftApConfig(bytes)!!
+        assertEquals("FirmwareAP", record.ssid)
+        assertEquals("secret12", record.passphrase)
+        assertEquals(ManualHotspotSecurity.WPA2, record.security)
+        assertEquals(1, record.legacyBand)
+        assertEquals(0, record.channel)
     }
 }

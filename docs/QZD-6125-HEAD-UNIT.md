@@ -19,6 +19,8 @@ hardware and devices you own or are authorized to test.
 - Zjinnova's `blink` service exposes a Bluetooth control protocol on
   `127.0.0.1:3152`. `ZjinnovaZbtDuplexStream` wraps RFCOMM data in the observed
   ZBT message `0x105` framing and provides a standalone wireless bootstrap.
+  This appears to be a proprietary JOYING/Zjinnova firmware interface rather
+  than an Android standard; see [JOYING `blink` Bluetooth Transport](JOYING-BLINK-BLUETOOTH.md).
 - The vendor Bluetooth service is still a firmware dependency. The ZLINK UI
   application does not need to be launched, but killing vendor services may
   also remove the `blink` endpoint.
@@ -29,6 +31,14 @@ hardware and devices you own or are authorized to test.
 Access to `/dev/i2c-0` depends on the firmware's Unix permissions and SELinux
 policy. The tested unit had root access available during development. This app
 does not obtain root or alter the device security policy.
+
+Root is not required for every xcertplay configuration. CH341 USB MFi or
+Remote MFi can be used on an unrooted device, and `Automatic` networking falls
+back to Wi-Fi Direct when the privileged system SoftAP path is unavailable.
+On the tested firmware, however, direct onboard I2C access and automatic
+startup of the saved Android SoftAP require root or equivalent vendor/system
+permissions. The app never unlocks the bootloader, installs root, or changes
+SELinux policy.
 
 ## Integration changes
 
@@ -83,6 +93,20 @@ units filter multi-touch movement. The QZD profile defaults to:
 Use `Save & Reconnect` after changing session-level settings. Protocol tracing
 is intentionally off by default because its logging overhead can affect the
 system being measured.
+
+The default wireless mode is `Automatic`. Before sending Wi-Fi credentials to
+the iPhone, it tries to read and start the firmware-configured SoftAP, accepts
+it only when it can verify 5 GHz operation, and uses its live SSID, password,
+security, channel, and interface. If the Android 10 vendor API is unavailable,
+the credentials are hidden, or the AP is not verifiably 5 GHz, it falls back
+to a newly created 5 GHz Wi-Fi P2P group. No SSID is hardcoded.
+
+Network selection is deliberately completed before the AirPlay session. An
+active wireless CarPlay session cannot be transparently moved between SoftAP
+and P2P because changing networks replaces the phone's route and invalidates
+the existing RTSP, audio, video, timing, and HID sockets. A later network
+change therefore requires a controlled reconnect rather than risking a loop
+of partial sessions.
 
 ## Diagnostics and interpretation
 

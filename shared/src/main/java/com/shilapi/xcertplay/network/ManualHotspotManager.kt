@@ -37,6 +37,7 @@ class ManualHotspotManager(
     band: ManualHotspotBand,
     channel: Int,
     security: ManualHotspotSecurity,
+    private val backend: WirelessHotspotBackend = WirelessHotspotBackend.MANUAL_HOTSPOT,
 ) : WirelessHotspotManager {
     private val appContext = context.applicationContext
     private val connectivityManager =
@@ -132,7 +133,7 @@ class ManualHotspotManager(
                         ManualHotspotBand.AUTO ->
                             frequencyMHz?.let(::bandLabel) ?: observedBandLabel ?: "Auto"
                     },
-                    backend = WirelessHotspotBackend.MANUAL_HOTSPOT,
+                    backend = backend,
                 )
             }
 
@@ -354,7 +355,7 @@ class ManualHotspotManager(
                 WifiConfiguration::class.java.getField("apBand").getInt(configuration)
             } catch (_: ReflectiveOperationException) {
                 null
-            }
+            }?.let(::normalizeLegacySoftApBand)
             ManualApConfiguration(
                 ssid = ssid,
                 band = band,
@@ -460,6 +461,13 @@ class ManualHotspotManager(
             "bond",
         )
     }
+}
+
+/** Converts legacy WifiConfiguration.AP_BAND_* values to SoftApConfiguration.BAND_* values. */
+internal fun normalizeLegacySoftApBand(legacyBand: Int): Int? = when (legacyBand) {
+    0 -> 1 // AP_BAND_2GHZ -> BAND_2GHZ
+    1 -> 2 // AP_BAND_5GHZ -> BAND_5GHZ
+    else -> null
 }
 
 private fun ManualHotspotSecurity.toIap2Security(): Iap2WirelessSecurity = when (this) {

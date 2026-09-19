@@ -96,6 +96,7 @@ class CarPlayHostActivity : ComponentActivity() {
         val safeAreaSize: DisplaySize?,
         val safeAreaRect: SafeAreaRect?,
         val customIconBytes: ByteArray?,
+        val sessionFingerprint: Int,
     )
 
     private lateinit var airPlayIdentity: AirPlayIdentity
@@ -175,12 +176,10 @@ class CarPlayHostActivity : ComponentActivity() {
                 appendLog("Location permission granted")
             } else if (locationReportingEnabled) {
                 locationReportingEnabled = false
-                if (!menuOpen) {
-                    AirPlayPersistence.saveLocationReportingEnabled(
-                        this@CarPlayHostActivity,
-                        false,
-                    )
-                }
+                AirPlayPersistence.saveLocationReportingEnabled(
+                    this@CarPlayHostActivity,
+                    false,
+                )
                 locationReportingSwitch?.isChecked = false
                 val approximateOnly =
                     grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
@@ -197,7 +196,7 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
     private val imagePicker =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri == null) {
                 externalActivityInProgress = false
                 return@registerForActivityResult
@@ -233,6 +232,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var statusScrollView: ScrollView? = null
     private var stageStatusView: TextView? = null
     private var performanceStatsView: TextView? = null
+    private var latestPerformanceStats: MediaPerformanceStats? = null
     private var resolutionValueView: TextView? = null
     private var resolutionPreviewView: TextView? = null
     private var hotspotStatusView: TextView? = null
@@ -287,7 +287,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var remoteMfiServer = ""
     private var remoteMfiToken = ""
     private var wirelessPermissionsReady = false
-    private var wirelessHotspotMode = WirelessHotspotMode.WIFI_P2P
+    private var wirelessHotspotMode = WirelessHotspotMode.AUTO_FASTEST
     private var manualHotspotSsid = ""
     private var manualHotspotPassphrase = ""
     private var manualHotspotBand = ManualHotspotBand.AUTO
@@ -307,6 +307,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var startAfterHandshakeReset = false
     private var restartGeneration = 0
     private var reconnectScheduled = false
+    private var pendingSettingsReconnectReason: String? = null
     private var sessionLog: SessionLogFile? = null
     private var gestureSequenceActive = false
     private var gestureTracking = false
@@ -381,7 +382,7 @@ class CarPlayHostActivity : ComponentActivity() {
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
                     if (menuOpen) {
-                        if (safeAreaEditorActive) closeSafeAreaEditor() else cancelSettingsEdits()
+                        if (safeAreaEditorActive) closeSafeAreaEditor() else saveSettingsAndReconnect()
                     } else {
                         isEnabled = false
                         onBackPressedDispatcher.onBackPressed()
@@ -851,6 +852,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 description = "Start CarPlay automatically after device boot",
             ) { checked ->
                 autoStartOnBoot = checked
+                AirPlayPersistence.saveAutoStartOnBoot(this, checked)
+                Log.i(TAG, "boot auto-start preference saved enabled=$checked")
                 appendLog("Boot auto-start ${if (checked) "enabled" else "disabled"}")
             },
             LinearLayout.LayoutParams(
@@ -964,6 +967,13 @@ class CarPlayHostActivity : ComponentActivity() {
                         displayScaleTenths = CarPlayDisplayScale.sanitize(
                             CarPlayDisplayScale.MIN_TENTHS + progress,
                         )
+                        if (fromUser) {
+                            AirPlayPersistence.saveDisplayScaleTenths(
+                                this@CarPlayHostActivity,
+                                displayScaleTenths,
+                            )
+                            Log.i(TAG, "display scale preference saved tenths=$displayScaleTenths")
+                        }
                         updateResolutionMenu()
                     }
 
@@ -1240,7 +1250,7 @@ class CarPlayHostActivity : ComponentActivity() {
         )
 
         val save = Button(this).apply {
-            text = "Save and reconnect"
+            text = "Save settings"
             isAllCaps = false
             textSize = 17f
             setTextColor(MENU_BUTTON_TEXT)
@@ -1297,11 +1307,11 @@ class CarPlayHostActivity : ComponentActivity() {
                 textSize = 22f
                 setTextColor(Color.WHITE)
                 backgroundTintList = ColorStateList.valueOf(MENU_TRACK_OFF)
-                contentDescription = "Discard changes and exit settings"
+                contentDescription = "Save changes and close settings"
                 minWidth = 0
                 minHeight = 0
                 setPadding(0, 0, 0, 0)
-                setOnClickListener { cancelSettingsEdits() }
+                setOnClickListener { saveSettingsAndReconnect() }
             },
             FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.START).apply {
                 leftMargin = dp(16)
@@ -1384,7 +1394,57 @@ class CarPlayHostActivity : ComponentActivity() {
                 AirPlayPersistence.loadSafeAreaRect(this, it.width, it.height)
             },
             customIconBytes = customIconBytes,
+            sessionFingerprint = sessionSettingsFingerprint(),
         )
+    }
+
+    /** Settings that require rebuilding the advertised accessory or media pipeline. */
+    private fun sessionSettingsFingerprint(): Int {
+        val size = currentActivitySize()
+        val safeArea = size?.let {
+            AirPlayPersistence.loadSafeAreaRect(this, it.width, it.height)
+        }
+        val iconHash = try {
+            AirPlayPersistence.loadCustomAirPlayIconFile(this)?.readBytes()?.contentHashCode() ?: 0
+        } catch (_: Exception) {
+            0
+        }
+        return listOf(
+            wirelessEnabled,
+            mfiTarget,
+            mfiI2cPath,
+            remoteMfiServer,
+            remoteMfiToken,
+            wirelessHotspotMode,
+            manualHotspotSsid,
+            manualHotspotPassphrase,
+            manualHotspotBand,
+            manualHotspotChannel,
+            manualHotspotSecurity,
+            locationReportingEnabled,
+            advancedAudioChannelMapping,
+            displayScaleTenths,
+            fps,
+            widthPhysicalMm,
+            physicalSizeBasis,
+            hevcEnabled,
+            hevcSoftwareDecoderEnabled,
+            manufacturer,
+            model,
+            oemLabel,
+            videoLowLatencyEnabled,
+            stableVideoTimestampsEnabled,
+            preserveVideoFramesEnabled,
+            audioLowLatencyEnabled,
+            protocolTraceEnabled,
+            rightHandDrive,
+            safeAreaDrawOutside,
+            safeArea?.left,
+            safeArea?.top,
+            safeArea?.width,
+            safeArea?.height,
+            iconHash,
+        ).hashCode()
     }
 
     private fun restoreSettingsBaseline() {
@@ -1415,7 +1475,9 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         settingsBaseline = null
         locationPermissionAvailable = hasFineLocationPermission()
-        hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
+        if (controller == null) {
+            hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
+        }
         syncMfiSettingsControls()
         updateManualHotspotFields()
         updateAirPlayIconPreview()
@@ -1630,6 +1692,9 @@ class CarPlayHostActivity : ComponentActivity() {
             val row = LinearLayout(this@CarPlayHostActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(52)
+                isClickable = true
+                isFocusable = true
             }
             row.addView(
                 menuText("Report location to iPhone", 20f, MENU_SECONDARY),
@@ -1652,6 +1717,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 }
             }
             locationReportingSwitch = switch
+            row.setOnClickListener { switch.isChecked = !switch.isChecked }
             row.addView(
                 switch,
                 LinearLayout.LayoutParams(
@@ -1682,6 +1748,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun onLocationReportingChanged(checked: Boolean) {
         if (locationReportingEnabled == checked) return
         locationReportingEnabled = checked
+        AirPlayPersistence.saveLocationReportingEnabled(this, checked)
+        Log.i(TAG, "location reporting preference saved enabled=$checked")
         appendLog(
             "Location reporting ${if (locationReportingEnabled) "enabled" else "disabled"}; " +
                 "applies when settings close",
@@ -1752,11 +1820,16 @@ class CarPlayHostActivity : ComponentActivity() {
         orientation = LinearLayout.VERTICAL
         addView(
             settingsSwitchRow(
-                label = "Performance statistics",
+                label = "Performance overlay",
                 checked = performanceStatsEnabled,
-                description = "Show decoder FPS, queue depth, totals, and wait count",
+                description = "Show active connection method, decoder FPS, queue, and latency",
             ) { checked ->
                 performanceStatsEnabled = checked
+                AirPlayPersistence.savePerformanceStatsEnabled(
+                    this@CarPlayHostActivity,
+                    checked,
+                )
+                Log.i(TAG, "performance overlay preference saved enabled=$checked")
                 updateDebugOverlays()
             },
         )
@@ -1867,6 +1940,18 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
+        section.addView(
+            menuText(
+                "Choose an image from internal storage or USB, then crop it to 1:1. " +
+                    "The new icon is advertised after the next CarPlay reconnect.",
+                14f,
+                MENU_SECONDARY,
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) },
+        )
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1888,11 +1973,11 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         actions.addView(
             Button(this).apply {
-                text = "Choose image"
+                text = "Choose PNG/JPG"
                 isAllCaps = false
                 setOnClickListener {
                     externalActivityInProgress = true
-                    imagePicker.launch("image/*")
+                    imagePicker.launch(arrayOf("image/png", "image/jpeg", "image/webp"))
                 }
             },
             LinearLayout.LayoutParams(
@@ -2163,6 +2248,9 @@ class CarPlayHostActivity : ComponentActivity() {
     ): View = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(52)
+        isClickable = true
+        isFocusable = true
         addView(
             menuText(label, 18f, MENU_SECONDARY).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -2211,26 +2299,28 @@ class CarPlayHostActivity : ComponentActivity() {
             menuText(label, 18f, MENU_SECONDARY),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
+        val toggle = Switch(this@CarPlayHostActivity).apply {
+            isChecked = checked
+            contentDescription = description
+            showText = false
+            thumbTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT, MENU_SECONDARY),
+            )
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
+            )
+            setOnCheckedChangeListener { _, value -> onChanged(value) }
+        }
         addView(
-            Switch(this@CarPlayHostActivity).apply {
-                isChecked = checked
-                contentDescription = description
-                showText = false
-                thumbTintList = ColorStateList(
-                    arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                    intArrayOf(MENU_ACCENT, MENU_SECONDARY),
-                )
-                trackTintList = ColorStateList(
-                    arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                    intArrayOf(MENU_ACCENT_TRACK, MENU_TRACK_OFF),
-                )
-                setOnCheckedChangeListener { _, value -> onChanged(value) }
-            },
+            toggle,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
+        setOnClickListener { toggle.isChecked = !toggle.isChecked }
     }
 
     private fun afterTextChanged(onChanged: (String) -> Unit): TextWatcher =
@@ -2272,6 +2362,7 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         val modes = buildList {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(WirelessHotspotMode.AUTO_FASTEST to "Automatic — system 5 GHz AP first")
                 add(WirelessHotspotMode.WIFI_P2P to "Wi-Fi P2P (5 GHz)")
             }
             add(WirelessHotspotMode.LOCAL_ONLY_HOTSPOT to "LocalOnlyHotspot")
@@ -2307,6 +2398,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 ?: return@setOnCheckedChangeListener
             if (wirelessHotspotMode == selected) return@setOnCheckedChangeListener
             wirelessHotspotMode = selected
+            AirPlayPersistence.saveWirelessHotspotMode(this, selected)
+            Log.i(TAG, "Wi-Fi session preference saved mode=$selected")
             hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
             updateHotspotStatusBlock()
             updateManualHotspotFields()
@@ -2321,6 +2414,19 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
+        )
+        section.addView(
+            menuText(
+                "Automatic reuses the firmware's verified 5 GHz SoftAP when available, " +
+                    "otherwise it creates a 5 GHz P2P group. Selection occurs before CarPlay " +
+                    "starts; changing networks during an active session requires reconnecting.",
+                14f,
+                MENU_SECONDARY,
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) },
         )
 
         val manualFields = LinearLayout(this).apply {
@@ -2482,6 +2588,7 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun hotspotModeLabel(mode: WirelessHotspotMode): String = when (mode) {
+        WirelessHotspotMode.AUTO_FASTEST -> "Automatic (system 5 GHz AP → P2P)"
         WirelessHotspotMode.WIFI_P2P -> "Wi-Fi P2P (5 GHz)"
         WirelessHotspotMode.LOCAL_ONLY_HOTSPOT -> "LocalOnlyHotspot"
         WirelessHotspotMode.MANUAL -> "Manual hotspot"
@@ -2525,6 +2632,7 @@ class CarPlayHostActivity : ComponentActivity() {
             else -> return
         }
         updateHotspotStatusBlock()
+        renderPerformanceOverlay()
     }
 
     private fun updateHotspotStatusBlock() {
@@ -2905,25 +3013,30 @@ class CarPlayHostActivity : ComponentActivity() {
             override fun onSessionEnded(session: AirPlaySession) {
                 runOnUiThread {
                     if (activeAirPlaySession === session) activeAirPlaySession = null
-                    if (menuOpen || controllerGeneration != restartGeneration) {
-                        return@runOnUiThread
-                    }
+                    if (controllerGeneration != restartGeneration) return@runOnUiThread
                     activeScreenStreamTypes.clear()
                     setConnectionStage("CarPlay session ended; reconnecting")
                     appendLog("AirPlay session ended; reconnecting from scratch")
-                    reconnectAfterLoss("AirPlay session ended")
+                    if (menuOpen) {
+                        pendingSettingsReconnectReason = "AirPlay session ended"
+                    } else {
+                        reconnectAfterLoss("AirPlay session ended")
+                    }
                 }
             }
 
             override fun onTransportError(message: String) {
                 runOnUiThread {
-                    if (menuOpen || controllerGeneration != restartGeneration) {
-                        return@runOnUiThread
-                    }
+                    if (controllerGeneration != restartGeneration) return@runOnUiThread
                     activeScreenStreamTypes.clear()
                     setConnectionStage("Transport error; reconnecting")
                     appendLog("CarPlay transport error: $message; reconnecting from scratch")
-                    reconnectAfterLoss("CarPlay transport error: $message")
+                    val reason = "CarPlay transport error: $message"
+                    if (menuOpen) {
+                        pendingSettingsReconnectReason = reason
+                    } else {
+                        reconnectAfterLoss(reason)
+                    }
                 }
             }
 
@@ -2996,6 +3109,16 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun startCarPlay(size: DisplaySize) {
         if (shuttingDown.get() || menuOpen || handshakeResetInProgress || controller != null) return
+        // Re-read the durable choice at the last responsible moment. This prevents a stale
+        // Activity field or an earlier default from overriding a user-selected Wi-Fi backend.
+        wirelessHotspotMode = AirPlayPersistence.loadWirelessHotspotMode(this)
+        performanceStatsEnabled = AirPlayPersistence.loadPerformanceStatsEnabled(this)
+        Log.i(
+            TAG,
+            "startup preferences hotspot=$wirelessHotspotMode " +
+                "performanceOverlay=$performanceStatsEnabled",
+        )
+        updateDebugOverlays()
         val controllerGeneration = restartGeneration
         val config = createRuntimeConfig()
         val airPlayConfig = createAirPlayConfig(size)
@@ -3193,81 +3316,44 @@ class CarPlayHostActivity : ComponentActivity() {
         if (menuOpen || shuttingDown.get()) return
         settingsBaseline = captureSettingsBaseline()
         menuOpen = true
-        handshakeResetInProgress = true
-        startAfterHandshakeReset = false
-        hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
-        updateHotspotStatusBlock()
-        val generation = ++restartGeneration
         controller?.sendTouch(emptyList())
-        val oldController = controller
-        val oldSink = sink
-        CarPlayBackgroundSession.clear(oldController)
-        controller = null
-        sink = null
-        activeScreenStreamTypes.clear()
-        setConnectionStage("Reconnecting after settings")
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
         updateDebugOverlays()
-        logLines.clear()
-        appendLog("Settings opened; CarPlay handshake reset")
+        appendLog("Settings opened; CarPlay session remains active in background")
         updateResolutionMenu()
-        teardownExecutor.execute {
-            try {
-                oldController?.close()
-                oldController?.awaitClosed(CONTROLLER_CLOSE_TIMEOUT_MILLIS)
-            } finally {
-                try {
-                    oldSink?.close()
-                } finally {
-                    runOnUiThread {
-                        if (shuttingDown.get() || generation != restartGeneration) {
-                            return@runOnUiThread
-                        }
-                        handshakeResetInProgress = false
-                        if (!menuOpen && startAfterHandshakeReset) {
-                            startAfterHandshakeReset = false
-                            maybeStartCarPlay()
-                        }
-                    }
-                }
-            }
-        }
     }
 
     private fun saveSettingsAndReconnect() {
         if (!menuOpen) return
         if (!validateMfiSettings()) return
         if (!validateManualHotspotSettings()) return
+        val reconnectRequired = settingsBaseline?.sessionFingerprint != sessionSettingsFingerprint()
         persistMenuSettings()
         settingsBaseline = null
-        finishSettingsMenu("Settings saved")
+        finishSettingsMenu("Settings saved", reconnectRequired)
     }
 
     private fun cancelSettingsEdits() {
         if (!menuOpen) return
         restoreSettingsBaseline()
-        finishSettingsMenu("Settings changes discarded")
+        finishSettingsMenu("Settings changes discarded", reconnect = false)
     }
 
-    private fun finishSettingsMenu(prefix: String) {
+    private fun finishSettingsMenu(prefix: String, reconnect: Boolean) {
         if (!menuOpen) return
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
         updateDebugOverlays()
-        logLines.clear()
-        appendLog(
-            "$prefix; starting a fresh handshake at " +
-                "${CarPlayDisplayScale.label(displayScaleTenths)} with " +
-                (if (hevcEnabled) "HEVC (H.265)" else "H.264") +
-                ", MFI ${mfiTargetLabel(mfiTarget)}" +
-                ", Wi-Fi session ${hotspotModeLabel(wirelessHotspotMode)}",
-        )
-        if (handshakeResetInProgress) {
-            startAfterHandshakeReset = true
+        val deferredReason = pendingSettingsReconnectReason
+        pendingSettingsReconnectReason = null
+        if (reconnect || deferredReason != null) {
+            val reason = deferredReason ?: "$prefix; applying session settings"
+            appendLog("$reason; starting a fresh handshake")
+            if (controller != null) restartCarPlay(reason) else maybeStartCarPlay()
         } else {
-            maybeStartCarPlay()
+            appendLog("$prefix; CarPlay session kept active")
         }
     }
 
@@ -3392,7 +3478,10 @@ class CarPlayHostActivity : ComponentActivity() {
                 activeScreenStreamTypes.add(type)
             } else {
                 activeScreenStreamTypes.remove(type)
-                if (activeScreenStreamTypes.isEmpty()) performanceStatsView?.text = ""
+                if (activeScreenStreamTypes.isEmpty()) {
+                    latestPerformanceStats = null
+                    performanceStatsView?.text = ""
+                }
             }
             updateDebugOverlays()
         }
@@ -3404,21 +3493,41 @@ class CarPlayHostActivity : ComponentActivity() {
     ) {
         runOnUiThread {
             if (shuttingDown.get() || generation != restartGeneration) return@runOnUiThread
-            val decoder = stats.decoderName.substringAfterLast('.').take(24)
-            performanceStatsView?.text = String.format(
-                Locale.US,
-                "%s  %.1f fps\nqueue %d / %.1f ms  decode %.1f ms\nwaits %d  in %,d  out %,d",
-                decoder,
-                stats.renderedFps,
-                stats.queueDepth,
-                stats.queueLatencyMs,
-                stats.decoderLatencyMs,
-                stats.decoderWaits,
-                stats.receivedFrames,
-                stats.renderedFrames,
-            )
+            latestPerformanceStats = stats
+            renderPerformanceOverlay()
             updateDebugOverlays()
         }
+    }
+
+    private fun renderPerformanceOverlay() {
+        val stats = latestPerformanceStats ?: return
+        val decoder = stats.decoderName.substringAfterLast('.').take(24)
+        val connectionMethod = hotspotStatus.backend
+            ?: if (wirelessEnabled) "Wireless (selecting)" else "Wired USB"
+        val radio = if (wirelessEnabled) {
+            buildString {
+                hotspotStatus.band?.let { append(" · ").append(it) }
+                hotspotStatus.channel?.let {
+                    append(" ch ").append(if (it == 0) "auto" else it)
+                }
+            }
+        } else {
+            ""
+        }
+        performanceStatsView?.text = String.format(
+            Locale.US,
+            "%s%s\n%s  %.1f fps\nqueue %d / %.1f ms  decode %.1f ms\nwaits %d  in %,d  out %,d",
+            connectionMethod,
+            radio,
+            decoder,
+            stats.renderedFps,
+            stats.queueDepth,
+            stats.queueLatencyMs,
+            stats.decoderLatencyMs,
+            stats.decoderWaits,
+            stats.receivedFrames,
+            stats.renderedFrames,
+        )
     }
 
     private fun setStatus(message: String) {

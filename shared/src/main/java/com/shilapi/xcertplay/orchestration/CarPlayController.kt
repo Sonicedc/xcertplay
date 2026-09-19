@@ -34,6 +34,7 @@ import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.RemoteMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
+import com.shilapi.xcertplay.network.FastestHotspotManager
 import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
 import com.shilapi.xcertplay.network.ManualHotspotManager
 import com.shilapi.xcertplay.network.WifiP2pGroupManager
@@ -1382,13 +1383,17 @@ class CarPlayController(
 
     private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
         val hotspotMode = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-            config.wirelessHotspotMode == WirelessHotspotMode.WIFI_P2P
+            config.wirelessHotspotMode in setOf(
+                WirelessHotspotMode.AUTO_FASTEST,
+                WirelessHotspotMode.WIFI_P2P,
+            )
         ) {
             WirelessHotspotMode.LOCAL_ONLY_HOTSPOT
         } else {
             config.wirelessHotspotMode
         }
         val manager: WirelessHotspotManager = when (hotspotMode) {
+            WirelessHotspotMode.AUTO_FASTEST -> FastestHotspotManager(appContext)
             WirelessHotspotMode.WIFI_P2P -> WifiP2pGroupManager(appContext)
             WirelessHotspotMode.LOCAL_ONLY_HOTSPOT -> LocalOnlyHotspotManager(appContext)
             WirelessHotspotMode.MANUAL -> ManualHotspotManager(
@@ -1402,7 +1407,11 @@ class CarPlayController(
             )
         }
         hotspot = manager
-        val timeoutMillis = if (hotspotMode == WirelessHotspotMode.WIFI_P2P) {
+        val timeoutMillis = if (hotspotMode in setOf(
+                WirelessHotspotMode.AUTO_FASTEST,
+                WirelessHotspotMode.WIFI_P2P,
+            )
+        ) {
             WIFI_P2P_START_TIMEOUT_MILLIS
         } else {
             HOTSPOT_START_TIMEOUT_MILLIS

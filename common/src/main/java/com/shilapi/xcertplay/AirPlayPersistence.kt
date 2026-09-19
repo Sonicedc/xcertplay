@@ -88,7 +88,7 @@ object AirPlayPersistence {
     fun saveDisplayScaleTenths(context: Context, tenths: Int) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putInt(KEY_DISPLAY_SCALE_TENTHS, CarPlayDisplayScale.sanitize(tenths))
-            .apply()
+            .commit()
     }
 
     fun loadHevcEnabled(context: Context): Boolean =
@@ -178,23 +178,15 @@ object AirPlayPersistence {
     }
 
     fun loadWirelessHotspotMode(context: Context): WirelessHotspotMode {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_WIRELESS_HOTSPOT_MODE, null)
-        val mode = WirelessHotspotMode.entries.firstOrNull { it.name == stored }
-            ?: WirelessHotspotMode.WIFI_P2P
-        return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-            mode == WirelessHotspotMode.WIFI_P2P
-        ) {
-            WirelessHotspotMode.LOCAL_ONLY_HOTSPOT
-        } else {
-            mode
-        }
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val stored = prefs.getString(KEY_WIRELESS_HOTSPOT_MODE, null)
+        return resolveWirelessHotspotMode(stored, Build.VERSION.SDK_INT)
     }
 
     fun saveWirelessHotspotMode(context: Context, mode: WirelessHotspotMode) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_WIRELESS_HOTSPOT_MODE, mode.name)
-            .apply()
+            .commit()
     }
 
     fun loadManualHotspotSsid(context: Context): String =
@@ -277,7 +269,7 @@ object AirPlayPersistence {
     fun savePerformanceStatsEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_PERFORMANCE_STATS_ENABLED, enabled)
-            .apply()
+            .commit()
     }
 
     fun loadVideoLowLatencyEnabled(context: Context): Boolean =
@@ -337,7 +329,7 @@ object AirPlayPersistence {
     fun saveAutoStartOnBoot(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_AUTO_START_ON_BOOT, enabled)
-            .apply()
+            .commit()
     }
 
     fun loadLocationReportingEnabled(context: Context): Boolean =
@@ -347,7 +339,7 @@ object AirPlayPersistence {
     fun saveLocationReportingEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_LOCATION_REPORTING_ENABLED, enabled)
-            .apply()
+            .commit()
     }
 
     fun loadManufacturer(context: Context): String =
@@ -640,4 +632,17 @@ object AirPlayPersistence {
 
     private fun safeAreaKey(widthPixels: Int, heightPixels: Int): String =
         "$SAFE_AREA_KEY_PREFIX${widthPixels}x$heightPixels"
+}
+
+/** Defaults only a genuinely unset/invalid preference; an explicit P2P choice is never migrated. */
+internal fun resolveWirelessHotspotMode(stored: String?, sdkInt: Int): WirelessHotspotMode {
+    val selected = WirelessHotspotMode.entries.firstOrNull { it.name == stored }
+        ?: WirelessHotspotMode.AUTO_FASTEST
+    return if (sdkInt < Build.VERSION_CODES.Q &&
+        selected in setOf(WirelessHotspotMode.AUTO_FASTEST, WirelessHotspotMode.WIFI_P2P)
+    ) {
+        WirelessHotspotMode.LOCAL_ONLY_HOTSPOT
+    } else {
+        selected
+    }
 }
